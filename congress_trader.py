@@ -238,30 +238,74 @@ td{{padding:9px 10px;border-bottom:1px solid #f8fafc}}
 
 
 def send_email(subject, html):
-    log.info(f"--- EMAIL DEBUG ---")
-    log.info(f"GMAIL_USER set: {bool(GMAIL_USER)} ({GMAIL_USER})")
-    log.info(f"GMAIL_APP_PWD set: {bool(GMAIL_APP_PWD)} (len={len(GMAIL_APP_PWD) if GMAIL_APP_PWD else 0})")
-    log.info(f"EMAIL_TO: {EMAIL_TO}")
+    """Invia email via Gmail SMTP su porta 587 (TLS) — funziona su Railway."""
     if not GMAIL_USER or not GMAIL_APP_PWD:
         log.warning("Gmail credentials mancanti — email saltata")
         return
+    log.info(f"Invio email a {EMAIL_TO} via SMTP TLS port 587…")
     msg = MIMEMultipart("alternative")
     msg["Subject"], msg["From"], msg["To"] = subject, GMAIL_USER, EMAIL_TO
     msg.attach(MIMEText(html, "html"))
+    # Prova porta 587 (STARTTLS) — Railway non blocca questa
+    for port, use_ssl in [(587, False), (465, True), (25, False)]:
+        try:
+            log.info(f"  Trying port {port} (ssl={use_ssl})…")
+            if use_ssl:
+                import ssl as _ssl
+                ctx = _ssl.create_default_context()
+                with smtplib.SMTP_SSL("smtp.gmail.com", port, context=ctx, timeout=10) as s:
+                    s.login(GMAIL_USER, GMAIL_APP_PWD)
+                    s.sendmail(GMAIL_USER, EMAIL_TO, msg.as_string())
+            else:
+                with smtplib.SMTP("smtp.gmail.com", port, timeout=10) as s:
+                    s.ehlo()
+                    s.starttls()
+                    s.ehlo()
+                    s.login(GMAIL_USER, GMAIL_APP_PWD)
+                    s.sendmail(GMAIL_USER, EMAIL_TO, msg.as_string())
+            log.info(f"✓ Email inviata a {EMAIL_TO} (port {port})")
+            return
+        except smtplib.SMTPAuthenticationError as e:
+            log.error(f"AUTH ERROR port {port}: password App Google non valida — {e}")
+            return   # inutile riprovare altre porte
+        except Exception as e:
+            log.warning(f"  Port {port} failed: {e}")
+    log.error("Tutti i tentativi SMTP falliti — Railway potrebbe bloccare tutte le porte SMTP")
+    _send_via_mailjet(subject, html)
+
+
+def _send_via_mailjet(subject: str, html: str):
+    """
+    Fallback: invia via Mailjet API (porta 443, mai bloccata).
+    Richiede MAILJET_KEY e MAILJET_SECRET nelle variabili Railway.
+    """
+    mj_key    = os.getenv("MAILJET_KEY", "")
+    mj_secret = os.getenv("MAILJET_SECRET", "")
+    if not mj_key or not mj_secret:
+        log.warning("Mailjet non configurato — aggiungi MAILJET_KEY e MAILJET_SECRET su Railway")
+        log.warning("Registrati gratis su mailjet.com (6000 email/mese gratis)")
+        return
+    payload = {
+        "Messages": [{
+            "From":    {"Email": GMAIL_USER, "Name": "Congress Trader"},
+            "To":      [{"Email": EMAIL_TO}],
+            "Subject": subject,
+            "HTMLPart": html,
+        }]
+    }
     try:
-        log.info("Connecting to smtp.gmail.com:465…")
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
-            log.info("Connected — logging in…")
-            s.login(GMAIL_USER, GMAIL_APP_PWD)
-            log.info("Logged in — sending…")
-            s.sendmail(GMAIL_USER, EMAIL_TO, msg.as_string())
-        log.info(f"✓ Email inviata a {EMAIL_TO}")
-    except smtplib.SMTPAuthenticationError as e:
-        log.error(f"SMTP AUTH ERROR: {e} — controlla che sia una App Password Google, non la password normale")
-    except smtplib.SMTPException as e:
-        log.error(f"SMTP error: {e}")
+        r = requests.post(
+            "https://api.mailjet.com/v3.1/send",
+            auth=(mj_key, mj_secret),
+            json=payload,
+            timeout=15,
+        )
+        if r.status_code == 200:
+            log.info(f"✓ Email inviata via Mailjet a {EMAIL_TO}")
+        else:
+            log.error(f"Mailjet error {r.status_code}: {r.text[:200]}")
     except Exception as e:
-        log.error(f"Email error generico: {e}")
+        log.error(f"Mailjet fallback error: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
