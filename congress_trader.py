@@ -238,6 +238,10 @@ td{{padding:9px 10px;border-bottom:1px solid #f8fafc}}
 
 
 def send_email(subject, html):
+    log.info(f"--- EMAIL DEBUG ---")
+    log.info(f"GMAIL_USER set: {bool(GMAIL_USER)} ({GMAIL_USER})")
+    log.info(f"GMAIL_APP_PWD set: {bool(GMAIL_APP_PWD)} (len={len(GMAIL_APP_PWD) if GMAIL_APP_PWD else 0})")
+    log.info(f"EMAIL_TO: {EMAIL_TO}")
     if not GMAIL_USER or not GMAIL_APP_PWD:
         log.warning("Gmail credentials mancanti — email saltata")
         return
@@ -245,12 +249,19 @@ def send_email(subject, html):
     msg["Subject"], msg["From"], msg["To"] = subject, GMAIL_USER, EMAIL_TO
     msg.attach(MIMEText(html, "html"))
     try:
+        log.info("Connecting to smtp.gmail.com:465…")
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+            log.info("Connected — logging in…")
             s.login(GMAIL_USER, GMAIL_APP_PWD)
+            log.info("Logged in — sending…")
             s.sendmail(GMAIL_USER, EMAIL_TO, msg.as_string())
         log.info(f"✓ Email inviata a {EMAIL_TO}")
+    except smtplib.SMTPAuthenticationError as e:
+        log.error(f"SMTP AUTH ERROR: {e} — controlla che sia una App Password Google, non la password normale")
+    except smtplib.SMTPException as e:
+        log.error(f"SMTP error: {e}")
     except Exception as e:
-        log.error(f"Email error: {e}")
+        log.error(f"Email error generico: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
