@@ -329,7 +329,7 @@ def run_daily_job():
     # 3. Trova i loro trade di OGGI (o ieri se weekend)
     today_trades = []
     for m in top_members:
-        today_trades.extend(get_recent_buys(m["name"], all_trades, days=1))
+        today_trades.extend(get_recent_buys(m["name"], all_trades, days=7))
     log.info(f"Trade recenti da copiare: {len(today_trades)}")
 
     # 4. Esegui su Alpaca
