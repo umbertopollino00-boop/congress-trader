@@ -1,6 +1,7 @@
 """
-Congress Trader Bot — v2
-Uses CapitolTrades internal API (same endpoints the browser calls).
+Congress Trader Bot — v3
+Usa l'API pubblica di Quiver Quantitative per i congressional trades.
+API gratuita, nessun blocco bot, dati affidabili.
 """
 
 import os
@@ -9,7 +10,9 @@ import time
 import logging
 import smtplib
 import requests
+import schedule
 from datetime import datetime, timedelta
+from collections import defaultdict
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
@@ -24,136 +27,110 @@ log = logging.getLogger(__name__)
 
 ALPACA_KEY     = os.getenv("ALPACA_KEY")
 ALPACA_SECRET  = os.getenv("ALPACA_SECRET")
+QUIVER_KEY     = os.getenv("QUIVER_KEY", "")          # opzionale, migliora i limiti
 GMAIL_USER     = os.getenv("GMAIL_USER")
 GMAIL_APP_PWD  = os.getenv("GMAIL_APP_PWD")
 EMAIL_TO       = os.getenv("EMAIL_TO", GMAIL_USER)
 TOP_N_MEMBERS  = int(os.getenv("TOP_N_MEMBERS", "5"))
 TRADE_SIZE_USD = float(os.getenv("TRADE_SIZE_USD", "500"))
+DRY_RUN        = os.getenv("DRY_RUN", "false").lower() == "true"
 
-# CapitolTrades internal API — these are the XHR calls the browser makes
-CT_API = "https://api.capitoltrades.com"
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json",
-    "Origin": "https://www.capitoltrades.com",
-    "Referer": "https://www.capitoltrades.com/",
-}
+QUIVER_BASE = "https://api.quiverquant.com/beta"
+QH = {"Accept": "application/json", "X-CSRFToken": "quiver"}
+if QUIVER_KEY:
+    QH["Authorization"] = f"Token {QUIVER_KEY}"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 1. CAPITOL TRADES API
+# 1. DATI CONGRESSIONAL TRADES — Quiver Quantitative (gratuito)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fetch_top_members(n=TOP_N_MEMBERS) -> list[dict]:
-    """Fetch top-n politicians sorted by 12-month return via CapitolTrades API."""
-    url = f"{CT_API}/politicians"
-    params = {
-        "sortBy": "perf_last_12m",
-        "sortOrder": "desc",
-        "page": 1,
-        "pageSize": n,
-    }
-    log.info("Fetching leaderboard from CapitolTrades API…")
+def fetch_all_trades_last_n_days(days: int = 365) -> list[dict]:
+    """Scarica tutti i congressional trades degli ultimi N giorni."""
+    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    url   = f"{QUIVER_BASE}/live/congresstrading"
+    log.info(f"Fetching congressional trades since {since}…")
     try:
-        r = requests.get(url, params=params, headers=HEADERS, timeout=15)
+        r = requests.get(url, headers=QH, timeout=20)
         r.raise_for_status()
-        data = r.json()
-        politicians = data.get("data", data.get("politicians", data if isinstance(data, list) else []))
-        members = []
-        for p in politicians[:n]:
-            perf = p.get("perfLast12m") or p.get("perf_last_12m") or p.get("performance", {}).get("last12m", 0) or 0
-            pid  = p.get("id") or p.get("politicianId") or p.get("slug") or ""
-            members.append({
-                "name":       p.get("fullName") or p.get("name") or "Unknown",
-                "party":      p.get("party") or "",
-                "chamber":    p.get("chamber") or "",
-                "return_pct": float(perf),
-                "id":         str(pid),
-            })
-        members.sort(key=lambda x: x["return_pct"], reverse=True)
-        log.info(f"Top members: {[m['name'] for m in members]}")
-        return members
+        trades = r.json()
+        # filtra per data
+        result = [
+            t for t in trades
+            if t.get("TransactionDate", "9999") >= since
+        ]
+        log.info(f"  {len(result)} trades fetched (last {days} days)")
+        return result
     except Exception as e:
-        log.error(f"API fetch failed: {e}")
-        return _fetch_members_fallback(n)
-
-
-def _fetch_members_fallback(n: int) -> list[dict]:
-    """Fallback: fetch trades endpoint and derive top traders by volume/recency."""
-    log.info("Trying fallback: /trades endpoint…")
-    try:
-        r = requests.get(f"{CT_API}/trades", headers=HEADERS, params={"pageSize": 100}, timeout=15)
-        r.raise_for_status()
-        trades = r.json().get("data", [])
-        counts = {}
-        for t in trades:
-            pol = t.get("politician") or {}
-            name = pol.get("fullName") or pol.get("name") or t.get("politicianName") or "Unknown"
-            pid  = pol.get("id") or t.get("politicianId") or name
-            if name not in counts:
-                counts[name] = {
-                    "name": name, "party": pol.get("party", ""),
-                    "chamber": pol.get("chamber", ""), "return_pct": 0.0,
-                    "id": str(pid), "count": 0,
-                }
-            counts[name]["count"] += 1
-        top = sorted(counts.values(), key=lambda x: x["count"], reverse=True)[:n]
-        log.info(f"Fallback top members: {[m['name'] for m in top]}")
-        return top
-    except Exception as e:
-        log.error(f"Fallback also failed: {e}")
+        log.error(f"Quiver fetch error: {e}")
         return []
 
 
-def fetch_member_trades(member: dict, lookback_days: int = 1) -> list[dict]:
-    """Fetch recent trades for a member via the API."""
-    since = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
-    pid = member["id"]
-    trades = []
+def rank_members_by_performance(trades: list[dict], top_n: int = TOP_N_MEMBERS) -> list[dict]:
+    """
+    Calcola un proxy di performance per ogni membro:
+    conta quanti BUY hanno fatto sui titoli che sono poi saliti
+    (proxy semplice: volume di acquisti nell'anno).
+    Restituisce i top_n con più acquisti — sono i più "attivi/fiduciosi".
+    """
+    buys = defaultdict(lambda: {"name": "", "party": "", "count": 0, "tickers": []})
+    for t in trades:
+        tx = (t.get("Transaction") or "").upper()
+        if "PURCHASE" not in tx and "BUY" not in tx:
+            continue
+        name   = t.get("Representative") or t.get("Name") or "Unknown"
+        party  = t.get("Party") or ""
+        ticker = (t.get("Ticker") or "").upper().strip()
+        if name == "Unknown" or not ticker:
+            continue
+        buys[name]["name"]  = name
+        buys[name]["party"] = party
+        buys[name]["count"] += 1
+        if ticker not in buys[name]["tickers"]:
+            buys[name]["tickers"].append(ticker)
 
-    # Try by politician id
-    for url, params in [
-        (f"{CT_API}/trades", {"politicianId": pid, "dateFrom": since, "pageSize": 50}),
-        (f"{CT_API}/politicians/{pid}/trades", {"dateFrom": since, "pageSize": 50}),
-    ]:
-        try:
-            r = requests.get(url, params=params, headers=HEADERS, timeout=15)
-            if r.status_code == 200:
-                items = r.json().get("data", [])
-                for t in items:
-                    issuer = t.get("issuer") or t.get("stock") or {}
-                    ticker = issuer.get("ticker") or t.get("ticker") or ""
-                    if ":" in str(ticker):
-                        ticker = ticker.split(":")[0]
-                    ticker = str(ticker).upper().strip()
-                    if not ticker or ticker in ("--", "N/A", "NONE"):
-                        continue
-                    tx = (t.get("txType") or t.get("type") or t.get("transactionType") or "").lower()
-                    direction = "buy" if any(w in tx for w in ("purchase", "buy")) else "sell"
-                    date_str  = t.get("transactionDate") or t.get("tradeDate") or t.get("date") or ""
-                    trades.append({
-                        "ticker":    ticker,
-                        "direction": direction,
-                        "date":      date_str[:10],
-                        "member":    member["name"],
-                    })
-                if trades:
-                    break
-        except Exception as e:
-            log.debug(f"  Trade fetch error ({url}): {e}")
+    ranked = sorted(buys.values(), key=lambda x: x["count"], reverse=True)[:top_n]
+    for m in ranked:
+        m["return_pct"] = float(m["count"])   # proxy: usa conteggio come score
+        m["chamber"]    = ""
+    log.info(f"Top {top_n} members by buy activity: {[m['name'] for m in ranked]}")
+    return ranked
 
-    log.info(f"  {member['name']}: {len(trades)} trade(s)")
-    return trades
+
+def get_recent_buys(member_name: str, all_trades: list[dict], days: int = 1) -> list[dict]:
+    """Restituisce i BUY recenti di un membro specifico."""
+    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    result = []
+    for t in all_trades:
+        if (t.get("Representative") or t.get("Name") or "") != member_name:
+            continue
+        tx   = (t.get("Transaction") or "").upper()
+        date = t.get("TransactionDate") or t.get("DisclosureDate") or ""
+        if date < since:
+            continue
+        ticker = (t.get("Ticker") or "").upper().strip()
+        if not ticker or ticker in ("--", "N/A"):
+            continue
+        direction = "buy" if "PURCHASE" in tx or "BUY" in tx else "sell"
+        result.append({
+            "ticker":    ticker,
+            "direction": direction,
+            "date":      date[:10],
+            "member":    member_name,
+        })
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 2. ALPACA TRADING
 # ══════════════════════════════════════════════════════════════════════════════
 
-def get_client() -> TradingClient:
+def get_client():
     return TradingClient(ALPACA_KEY, ALPACA_SECRET, paper=True)
 
 
-def execute_trades(trades: list[dict], dry_run: bool = False) -> list[dict]:
+def execute_trades(trades: list[dict]) -> list[dict]:
+    if not trades:
+        return []
     client  = get_client()
     account = client.get_account()
     bp      = float(account.buying_power)
@@ -165,7 +142,6 @@ def execute_trades(trades: list[dict], dry_run: bool = False) -> list[dict]:
         if t in seen:
             continue
         seen.add(t)
-
         side = OrderSide.BUY if trade["direction"] == "buy" else OrderSide.SELL
 
         try:
@@ -173,17 +149,19 @@ def execute_trades(trades: list[dict], dry_run: bool = False) -> list[dict]:
             if not (asset.tradable and asset.status == "active"):
                 raise ValueError("not tradable")
         except Exception:
-            results.append({**trade, "status": "skipped", "reason": "not tradable"})
+            results.append({**trade, "status": "skipped", "reason": "not tradable on Alpaca"})
             continue
 
         if side == OrderSide.SELL:
             positions = {p.symbol: float(p.qty) for p in client.get_all_positions()}
             if t not in positions:
-                results.append({**trade, "status": "skipped", "reason": "no position"})
+                results.append({**trade, "status": "skipped", "reason": "no position to sell"})
                 continue
 
         notional = min(TRADE_SIZE_USD, bp * 0.1)
-        if dry_run:
+
+        if DRY_RUN:
+            log.info(f"  [DRY RUN] {side.value} ${notional:.0f} {t}")
             results.append({**trade, "status": "dry_run", "notional": notional})
             continue
 
@@ -192,7 +170,7 @@ def execute_trades(trades: list[dict], dry_run: bool = False) -> list[dict]:
                 symbol=t, notional=round(notional, 2),
                 side=side, time_in_force=TimeInForce.DAY,
             ))
-            log.info(f"  ✓ {side.value} ${notional:.0f} {t}")
+            log.info(f"  ✓ {side.value} ${notional:.0f} {t} — order {order.id}")
             results.append({**trade, "status": "submitted", "order_id": str(order.id), "notional": notional})
             bp -= notional
         except Exception as e:
@@ -203,14 +181,13 @@ def execute_trades(trades: list[dict], dry_run: bool = False) -> list[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 3. EMAIL
+# 3. EMAIL REPORT
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_html(top_members, results, date_str):
     member_rows = "".join(
-        f"<tr><td>{m['name']}</td><td>{m['party']}</td><td>{m['chamber']}</td>"
-        f"<td style='color:{'#22c55e' if m['return_pct']>=0 else '#ef4444'};font-weight:600'>"
-        f"{'+' if m['return_pct']>=0 else ''}{m['return_pct']:.1f}%</td></tr>"
+        f"<tr><td>{m['name']}</td><td>{m['party']}</td>"
+        f"<td style='font-weight:600;color:#3b82f6'>{int(m['return_pct'])} buys/yr</td></tr>"
         for m in top_members
     )
     def badge(s):
@@ -221,15 +198,16 @@ def build_html(top_members, results, date_str):
         f"<td>{r['member']}</td><td>{r.get('date','')}</td>"
         f"<td>{badge(r['status'])}</td><td>${r.get('notional',0):.0f}</td></tr>"
         for r in results
-    ) or "<tr><td colspan='6' style='text-align:center;color:#6b7280'>No trades today</td></tr>"
+    ) or "<tr><td colspan='6' style='text-align:center;color:#94a3b8;padding:16px'>Nessun trade oggi — i congressisti non hanno segnalato nuove operazioni</td></tr>"
     sub = sum(1 for r in results if r["status"]=="submitted")
     skp = sum(1 for r in results if r["status"]=="skipped")
     err = sum(1 for r in results if r["status"]=="error")
+    mode_badge = "<span style='background:#6366f1;color:#fff;padding:2px 10px;border-radius:99px;font-size:11px'>DRY RUN</span>" if DRY_RUN else "<span style='background:#22c55e;color:#fff;padding:2px 10px;border-radius:99px;font-size:11px'>LIVE PAPER</span>"
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <style>body{{font-family:Arial,sans-serif;background:#f8fafc;color:#1e293b;margin:0}}
 .c{{max-width:680px;margin:32px auto;background:#fff;border-radius:12px;overflow:hidden}}
-.h{{background:linear-gradient(135deg,#0f172a,#1e3a5f);padding:32px 40px;color:#fff}}
-.h h1{{margin:0 0 4px;font-size:22px}}.h p{{margin:0;opacity:.6;font-size:13px}}
+.h{{background:#0f172a;padding:32px 40px;color:#fff}}
+.h h1{{margin:0 0 6px;font-size:22px}}.h p{{margin:0;opacity:.6;font-size:13px}}
 .s{{padding:24px 40px;border-bottom:1px solid #f1f5f9}}
 .s h2{{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:#64748b;margin:0 0 14px}}
 .stats{{display:flex;gap:12px}}.stat{{flex:1;background:#f8fafc;border-radius:8px;padding:12px;text-align:center}}
@@ -239,26 +217,29 @@ th{{text-align:left;padding:7px 10px;color:#94a3b8;font-size:11px;text-transform
 td{{padding:9px 10px;border-bottom:1px solid #f8fafc}}
 .f{{padding:16px 40px;text-align:center;font-size:12px;color:#94a3b8}}</style></head>
 <body><div class="c">
-<div class="h"><h1>Congress Trader — Daily Report</h1><p>{date_str}</p></div>
+<div class="h">
+  <h1>Congress Trader — Daily Report</h1>
+  <p>{date_str} &nbsp;·&nbsp; Alpaca Paper &nbsp;·&nbsp; {mode_badge}</p>
+</div>
 <div class="s"><h2>Summary</h2><div class="stats">
 <div class="stat"><div class="v" style="color:#22c55e">{sub}</div><div class="l">Placed</div></div>
 <div class="stat"><div class="v" style="color:#f59e0b">{skp}</div><div class="l">Skipped</div></div>
 <div class="stat"><div class="v" style="color:#ef4444">{err}</div><div class="l">Errors</div></div>
-<div class="stat"><div class="v">{len(top_members)}</div><div class="l">Tracked</div></div>
+<div class="stat"><div class="v">{len(top_members)}</div><div class="l">Members</div></div>
 </div></div>
-<div class="s"><h2>Top Members (12m return)</h2>
-<table><thead><tr><th>Name</th><th>Party</th><th>Chamber</th><th>12m Return</th></tr></thead>
+<div class="s"><h2>Top {len(top_members)} Congressisti più attivi (ultimi 12 mesi)</h2>
+<table><thead><tr><th>Nome</th><th>Partito</th><th>Attività</th></tr></thead>
 <tbody>{member_rows}</tbody></table></div>
-<div class="s"><h2>Trades</h2>
-<table><thead><tr><th>Ticker</th><th>Side</th><th>Member</th><th>Date</th><th>Status</th><th>Size</th></tr></thead>
+<div class="s"><h2>Trade di oggi</h2>
+<table><thead><tr><th>Ticker</th><th>Side</th><th>Membro</th><th>Data</th><th>Stato</th><th>Importo</th></tr></thead>
 <tbody>{trade_rows}</tbody></table></div>
-<div class="f">Congress Trader · Paper account · Not financial advice</div>
+<div class="f">Congress Trader Bot · Dati via Quiver Quantitative · Solo paper trading · Non è consulenza finanziaria</div>
 </div></body></html>"""
 
 
 def send_email(subject, html):
     if not GMAIL_USER or not GMAIL_APP_PWD:
-        log.warning("Gmail credentials missing — skipping email")
+        log.warning("Gmail credentials mancanti — email saltata")
         return
     msg = MIMEMultipart("alternative")
     msg["Subject"], msg["From"], msg["To"] = subject, GMAIL_USER, EMAIL_TO
@@ -267,7 +248,7 @@ def send_email(subject, html):
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
             s.login(GMAIL_USER, GMAIL_APP_PWD)
             s.sendmail(GMAIL_USER, EMAIL_TO, msg.as_string())
-        log.info(f"Email sent to {EMAIL_TO}")
+        log.info(f"✓ Email inviata a {EMAIL_TO}")
     except Exception as e:
         log.error(f"Email error: {e}")
 
@@ -276,47 +257,52 @@ def send_email(subject, html):
 # 4. MAIN JOB
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_daily_job(dry_run: bool = False):
-    date_str = datetime.now().strftime("%A, %B %d %Y · %H:%M")
-    log.info(f"═══ Congress Trader v2 running at {date_str} ═══")
+def run_daily_job():
+    date_str = datetime.now().strftime("%A, %d %B %Y · %H:%M")
+    log.info(f"═══ Congress Trader v3 · {date_str} ═══")
 
-    top_members = fetch_top_members(TOP_N_MEMBERS)
-    if not top_members:
-        log.error("No members fetched — aborting")
-        send_email("Congress Trader ⚠️ — No data", "<p>Could not fetch members from CapitolTrades.</p>")
+    # 1. Scarica tutti i trade dell'anno
+    all_trades = fetch_all_trades_last_n_days(days=365)
+    if not all_trades:
+        log.error("Nessun dato — aborting")
+        send_email("Congress Trader ⚠️ — Nessun dato", "<p>Impossibile scaricare i dati da Quiver Quantitative.</p>")
         return
 
-    all_trades = []
+    # 2. Classifica i top membri
+    top_members = rank_members_by_performance(all_trades, top_n=TOP_N_MEMBERS)
+
+    # 3. Trova i loro trade di OGGI (o ieri se weekend)
+    today_trades = []
     for m in top_members:
-        all_trades.extend(fetch_member_trades(m, lookback_days=1))
-    log.info(f"Trades to process: {len(all_trades)}")
+        today_trades.extend(get_recent_buys(m["name"], all_trades, days=1))
+    log.info(f"Trade recenti da copiare: {len(today_trades)}")
 
-    results = execute_trades(all_trades, dry_run=dry_run)
+    # 4. Esegui su Alpaca
+    results = execute_trades(today_trades)
 
+    # 5. Manda email
     html = build_html(top_members, results, date_str)
-    sub  = f"Congress Trader | {datetime.now().strftime('%d %b %Y')} | {sum(1 for r in results if r['status']=='submitted')} orders"
-    send_email(sub, html)
+    subj = f"Congress Trader | {datetime.now().strftime('%d %b %Y')} | {sum(1 for r in results if r['status']=='submitted')} ordini"
+    send_email(subj, html)
     log.info("═══ Done ═══")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 5. SCHEDULER
+# 5. ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    import schedule
-
-    DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
     RUN_NOW = os.getenv("RUN_NOW", "false").lower() == "true"
 
     if RUN_NOW:
-        run_daily_job(dry_run=DRY_RUN)
+        run_daily_job()
 
+    # Ogni giorno feriale alle 09:35 ET (15:35 ora italiana)
     for day in [schedule.every().monday, schedule.every().tuesday, schedule.every().wednesday,
                 schedule.every().thursday, schedule.every().friday]:
-        day.at("09:35").do(run_daily_job, dry_run=DRY_RUN)
+        day.at("09:35").do(run_daily_job)
 
-    log.info("Scheduler running — fires at 09:35 ET on weekdays…")
+    log.info("Scheduler attivo — si esegue alle 09:35 ET nei giorni feriali…")
     while True:
         schedule.run_pending()
         time.sleep(30)
