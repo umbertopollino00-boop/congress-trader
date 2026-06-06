@@ -110,106 +110,66 @@ def get_recent_congress_trades(member_name, all_trades, days=7):
     return result
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 2. HEDGE FUND 13F
+# 2. HEDGE FUND 13F — via Quiver Quantitative sec13f endpoint
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fetch_13f(cik: str, fund_name: str) -> list[dict]:
+# Fund name → owner string used by Quiver sec13f API
+FUND_OWNERS = {
+    "Situational Awareness (Aschenbrenner)": "SITUATIONAL AWARENESS",
+    "Renaissance Technologies (Simons)":     "RENAISSANCE TECHNOLOGIES",
+    "Citadel Advisors (Griffin)":            "CITADEL ADVISORS",
+}
+
+def fetch_13f_quiver(fund_name: str, owner_query: str) -> list[dict]:
+    """Fetch top 15 positions for a fund via Quiver sec13f endpoint."""
     log.info(f"[13F] Fetching {fund_name}…")
+    url = f"https://api.quiverquant.com/beta/live/sec13f?owner={requests.utils.quote(owner_query)}"
+    headers = {"Accept": "application/json"}
+    if QUIVER_KEY:
+        headers["Authorization"] = f"Token {QUIVER_KEY}"
     try:
-        r = requests.get(f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json",
-                         headers=SEC_HEADERS, timeout=15)
-        r.raise_for_status()
-        data = r.json()
-    except Exception as e:
-        log.error(f"[13F] SEC error {fund_name}: {e}")
-        return []
-
-    filings    = data.get("filings",{}).get("recent",{})
-    forms      = filings.get("form",[])
-    accessions = filings.get("accessionNumber",[])
-    dates      = filings.get("filingDate",[])
-
-    latest_acc = latest_date = None
-    for form, acc, date in zip(forms, accessions, dates):
-        if "13F-HR" in form:
-            latest_acc  = acc.replace("-","")
-            latest_date = date
-            break
-
-    if not latest_acc:
-        log.warning(f"[13F] No 13F found for {fund_name}")
-        return []
-
-    log.info(f"[13F] {fund_name}: latest 13F {latest_date}")
-
-    try:
-        cik_int = int(cik)
-        idx_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{latest_acc}/index.json"
-        r2 = requests.get(idx_url, headers=SEC_HEADERS, timeout=15)
-        r2.raise_for_status()
-        idx = r2.json()
-    except Exception as e:
-        log.error(f"[13F] Index error {fund_name}: {e}")
-        return []
-
-    info_file = None
-    for item in idx.get("directory",{}).get("item",[]):
-        name = item.get("name","").lower()
-        if "infotable" in name and name.endswith(".xml"):
-            info_file = item["name"]
-            break
-    if not info_file:
-        for item in idx.get("directory",{}).get("item",[]):
-            if item.get("name","").lower().endswith(".xml"):
-                info_file = item["name"]
-                break
-
-    if not info_file:
-        log.warning(f"[13F] infotable not found for {fund_name}")
-        return []
-
-    try:
-        xml_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{latest_acc}/{info_file}"
-        r3 = requests.get(xml_url, headers=SEC_HEADERS, timeout=15)
-        r3.raise_for_status()
-        root = ET.fromstring(r3.content)
-
-        positions = []
-        for entry in root.findall(".//{*}infoTable"):
-            def g(tag):
-                el = entry.find(f"{{*}}{tag}")
-                return el.text.strip() if el is not None and el.text else ""
-            ticker   = g("ticker")
-            put_call = g("putCall")
-            value    = g("value")
-            shares   = g("sshPrnamt") or g("shrsOrPrnAmt")
-            if not ticker or put_call in ("Put","Call"):
-                continue
-            try:
+        r = requests.get(url, headers=headers, timeout=20)
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, str):
+                log.warning(f"[13F] {fund_name}: {data}")
+                return []
+            # Sort by value descending, take top 15
+            positions = []
+            for item in data:
+                ticker = (item.get("Ticker") or "").upper().strip()
+                if not ticker or ticker in ("--", "N/A"):
+                    continue
+                try:
+                    value = float(item.get("Value") or item.get("value") or 0)
+                    shares = int(item.get("Shares") or item.get("shares") or 0)
+                    period = str(item.get("ReportPeriod") or item.get("Date") or "")[:10]
+                except Exception:
+                    continue
                 positions.append({
-                    "ticker":    ticker.upper(),
-                    "name":      g("nameOfIssuer"),
-                    "value_usd": float(value)*1000,
-                    "shares":    int(shares),
+                    "ticker":    ticker,
+                    "name":      item.get("SecurityName") or item.get("Name") or ticker,
+                    "value_usd": value * 1000,   # Quiver reports in $thousands
+                    "shares":    shares,
                     "fund":      fund_name,
-                    "date":      latest_date,
+                    "date":      period,
                 })
-            except Exception:
-                continue
-
-        positions.sort(key=lambda x: x["value_usd"], reverse=True)
-        log.info(f"[13F] {fund_name}: {len(positions)} positions")
-        return positions[:15]   # top 15 per fondo (come Copilot)
-
+            positions.sort(key=lambda x: x["value_usd"], reverse=True)
+            top15 = positions[:15]
+            log.info(f"[13F] {fund_name}: {len(top15)} positions")
+            return top15
+        else:
+            log.warning(f"[13F] {fund_name}: HTTP {r.status_code} — {r.text[:100]}")
+            return []
     except Exception as e:
-        log.error(f"[13F] XML parse error {fund_name}: {e}")
+        log.error(f"[13F] {fund_name} error: {e}")
         return []
 
 def fetch_all_13f():
     results = {}
-    for name, cik in HEDGE_FUNDS.items():
-        results[name] = fetch_13f(cik, name)
-        time.sleep(0.5)
+    for name, owner in FUND_OWNERS.items():
+        results[name] = fetch_13f_quiver(name, owner)
+        time.sleep(0.3)
     return results
 
 def get_13f_trades(fund_positions):
@@ -231,6 +191,37 @@ def get_13f_trades(fund_positions):
                 "value_usd": p["value_usd"],
             })
     return trades
+
+def compute_overlap(congress_members, fund_positions) -> list[dict]:
+    """
+    Trova i ticker presenti sia nei portafogli dei congressisti
+    sia nelle posizioni dei fondi hedge — segnale ad alta conviction.
+    """
+    # Raccogli tutti i ticker dei congressisti
+    congress_tickers = set()
+    for m in congress_members:
+        for t in m.get("tickers", []):
+            congress_tickers.add(t.upper())
+
+    # Conta overlap con i fondi
+    overlap = {}
+    for fund, positions in fund_positions.items():
+        for p in positions:
+            t = p["ticker"].upper()
+            if t in congress_tickers:
+                if t not in overlap:
+                    overlap[t] = {
+                        "ticker":    t,
+                        "name":      p.get("name", t),
+                        "funds":     [],
+                        "value_usd": 0,
+                    }
+                overlap[t]["funds"].append(fund.split("(")[0].strip())
+                overlap[t]["value_usd"] += p["value_usd"]
+
+    result = sorted(overlap.values(), key=lambda x: (len(x["funds"]), x["value_usd"]), reverse=True)
+    log.info(f"[Overlap] {len(result)} ticker in comune tra politici e fondi")
+    return result
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 3. PEAD — Gen AI Earnings (replica fedele del whitepaper)
@@ -576,7 +567,7 @@ def source_badge(s):
     return f"<span style='background:{c};color:#fff;padding:2px 8px;border-radius:99px;font-size:11px'>{s}</span>"
 
 
-def build_portfolio_section(congress_members, fund_positions) -> str:
+def build_portfolio_section(congress_members, fund_positions, overlap=None) -> str:
     """Sezione fissa con la composizione completa dei portafogli."""
 
     # Congressisti: tutti i ticker noti per ciascun membro
@@ -625,9 +616,37 @@ def build_portfolio_section(congress_members, fund_positions) -> str:
             f"<tbody>{rows}</tbody></table></div>"
         )
 
-    return congress_section + fund_sections
+    # Overlap section
+    overlap_rows = ""
+    for item in (overlap or []):
+        funds_str = ", ".join(item["funds"])
+        stars = "⭐" * len(item["funds"])
+        val_m = item["value_usd"] / 1_000_000
+        overlap_rows += (
+            f"<tr><td><b style='color:#0f172a'>{item['ticker']}</b></td>"
+            f"<td style='font-size:11px;color:#64748b'>{item['name'][:30]}</td>"
+            f"<td>{stars}</td>"
+            f"<td style='font-size:11px'>{funds_str}</td>"
+            f"<td style='color:#22c55e;font-weight:600'>${val_m:.0f}M</td></tr>"
+        )
 
-def build_html(congress_members, fund_positions, results, date_str, all_congress_trades=None):
+    if overlap:
+        overlap_section = (
+            "<div class='s' style='background:#fefce8;border-left:4px solid #f59e0b;padding:20px 36px'>"
+            "<h2 style='color:#92400e'>🎯 Alta Conviction — Overlap Politici + Fondi</h2>"
+            "<p style='font-size:11px;color:#92400e;margin:0 0 10px'>"
+            "Ticker presenti sia nei portafogli dei congressisti sia nelle posizioni 13F dei fondi hedge</p>"
+            "<table><thead><tr>"
+            "<th>Ticker</th><th>Società</th><th>Fondi</th><th>Dettaglio</th><th>Valore 13F</th>"
+            "</tr></thead>"
+            f"<tbody>{overlap_rows}</tbody></table></div>"
+        )
+    else:
+        overlap_section = ""
+
+    return overlap_section + congress_section + fund_sections
+
+def build_html(congress_members, fund_positions, results, date_str, all_congress_trades=None, overlap_data=None):
     mode = "<span style='background:#6366f1;color:#fff;padding:2px 10px;border-radius:99px;font-size:11px'>DRY RUN</span>" if DRY_RUN else "<span style='background:#22c55e;color:#fff;padding:2px 10px;border-radius:99px;font-size:11px'>LIVE PAPER</span>"
 
     # Stats
@@ -713,7 +732,7 @@ td{{padding:8px 8px;border-bottom:1px solid #f8fafc;vertical-align:middle}}
 <table><thead><tr><th>Ticker</th><th>SUE</th><th>AI Score</th><th>Sintesi</th><th>Stato</th></tr></thead>
 <tbody>{pead_rows}</tbody></table></div>
 
-{build_portfolio_section(congress_members, fund_positions)}<div class="s"><h2>📋 Tutti i trade eseguiti oggi</h2>
+{build_portfolio_section(congress_members, fund_positions, overlap=overlap_data)}<div class="s"><h2>📋 Tutti i trade eseguiti oggi</h2>
 <table><thead><tr><th>Ticker</th><th>Fonte</th><th>Manager</th><th>Stato</th><th>Importo</th></tr></thead>
 <tbody>{trade_rows}</tbody></table></div>
 
@@ -795,7 +814,9 @@ def run_daily_job():
     results = execute_trades(all_trades)
 
     # 5. Email
-    html  = build_html(top_members, fund_positions, results, date_str, all_congress_trades=congress_raw)
+    overlap = compute_overlap(top_members, fund_positions)
+    html  = build_html(top_members, fund_positions, results, date_str,
+                       all_congress_trades=congress_raw, overlap_data=overlap)
     subj  = f"Congress+HF Trader | {datetime.now().strftime('%d %b %Y')} | {sum(1 for r in results if r['status'] in ('submitted','dry_run'))} ordini"
     send_email(subj, html)
     log.info("═══ Done ═══")
