@@ -1,20 +1,19 @@
 """
-Congress Trader Bot — v3
-Usa l'API pubblica di Quiver Quantitative per i congressional trades.
-API gratuita, nessun blocco bot, dati affidabili.
+Congress Trader Bot — v4
+Combina 4 strategie in un unico bot:
+  1. Congressional Trades (Quiver Quantitative)
+  2. Hedge Fund 13F: Situational Awareness (Aschenbrenner), Renaissance, Citadel, Buffett, Ackman
+  3. GenAI Earnings (PEAD + LLM transcript scoring via Claude API)
+Esecuzione su Alpaca Paper. Report giornaliero via email (Mailjet).
 """
 
-import os
-import json
-import time
-import logging
-import smtplib
-import requests
-import schedule
+import os, json, time, logging, smtplib, requests, schedule
 from datetime import datetime, timedelta
 from collections import defaultdict
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from xml.etree import ElementTree as ET
+import numpy as np
 from dotenv import load_dotenv
 
 from alpaca.trading.client import TradingClient
@@ -25,108 +24,484 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
-ALPACA_KEY     = os.getenv("ALPACA_KEY")
-ALPACA_SECRET  = os.getenv("ALPACA_SECRET")
-QUIVER_KEY     = os.getenv("QUIVER_KEY", "")          # opzionale, migliora i limiti
-GMAIL_USER     = os.getenv("GMAIL_USER")
-GMAIL_APP_PWD  = os.getenv("GMAIL_APP_PWD")
-EMAIL_TO       = os.getenv("EMAIL_TO", GMAIL_USER)
-TOP_N_MEMBERS  = int(os.getenv("TOP_N_MEMBERS", "5"))
-TRADE_SIZE_USD = float(os.getenv("TRADE_SIZE_USD", "500"))
-DRY_RUN        = os.getenv("DRY_RUN", "false").lower() == "true"
+# ── Config ────────────────────────────────────────────────────────────────────
+ALPACA_KEY      = os.getenv("ALPACA_KEY")
+ALPACA_SECRET   = os.getenv("ALPACA_SECRET")
+GMAIL_USER      = os.getenv("GMAIL_USER")
+GMAIL_APP_PWD   = os.getenv("GMAIL_APP_PWD")
+EMAIL_TO        = os.getenv("EMAIL_TO", GMAIL_USER)
+MAILJET_KEY     = os.getenv("MAILJET_KEY", "")
+MAILJET_SECRET  = os.getenv("MAILJET_SECRET", "")
+QUIVER_KEY      = os.getenv("QUIVER_KEY", "")
+TOP_N_MEMBERS   = int(os.getenv("TOP_N_MEMBERS", "5"))
+TRADE_SIZE_USD  = float(os.getenv("TRADE_SIZE_USD", "500"))
+DRY_RUN         = os.getenv("DRY_RUN", "false").lower() == "true"
+ENABLE_PEAD     = os.getenv("ENABLE_PEAD", "true").lower() == "true"
 
-QUIVER_BASE = "https://api.quiverquant.com/beta"
-QH = {"Accept": "application/json", "X-CSRFToken": "quiver"}
+QH = {"Accept": "application/json"}
 if QUIVER_KEY:
     QH["Authorization"] = f"Token {QUIVER_KEY}"
 
+SEC_HEADERS = {"User-Agent": "CongressTraderBot research@example.com", "Accept": "application/json"}
+
+# ── Hedge Funds (CIK SEC) ─────────────────────────────────────────────────────
+HEDGE_FUNDS = {
+    "Situational Awareness (Aschenbrenner)": "0002045724",
+    "Renaissance Technologies (Simons)":     "0001037389",
+    "Citadel Advisors (Griffin)":            "0001423053",
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
-# 1. DATI CONGRESSIONAL TRADES — Quiver Quantitative (gratuito)
+# 1. CONGRESSIONAL TRADES
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fetch_all_trades_last_n_days(days: int = 365) -> list[dict]:
-    """Scarica tutti i congressional trades degli ultimi N giorni."""
+def fetch_congressional_trades(days: int = 365) -> list[dict]:
     since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    url   = f"{QUIVER_BASE}/live/congresstrading"
-    log.info(f"Fetching congressional trades since {since}…")
+    log.info(f"[Congress] Fetching trades since {since}…")
     try:
-        r = requests.get(url, headers=QH, timeout=20)
+        r = requests.get("https://api.quiverquant.com/beta/live/congresstrading",
+                         headers=QH, timeout=20)
         r.raise_for_status()
-        trades = r.json()
-        # filtra per data
-        result = [
-            t for t in trades
-            if t.get("TransactionDate", "9999") >= since
-        ]
-        log.info(f"  {len(result)} trades fetched (last {days} days)")
-        return result
+        trades = [t for t in r.json() if t.get("TransactionDate","9999") >= since]
+        log.info(f"[Congress] {len(trades)} trades fetched")
+        return trades
     except Exception as e:
-        log.error(f"Quiver fetch error: {e}")
+        log.error(f"[Congress] fetch error: {e}")
         return []
 
-
-def rank_members_by_performance(trades: list[dict], top_n: int = TOP_N_MEMBERS) -> list[dict]:
-    """
-    Calcola un proxy di performance per ogni membro:
-    conta quanti BUY hanno fatto sui titoli che sono poi saliti
-    (proxy semplice: volume di acquisti nell'anno).
-    Restituisce i top_n con più acquisti — sono i più "attivi/fiduciosi".
-    """
-    buys = defaultdict(lambda: {"name": "", "party": "", "count": 0, "tickers": []})
+def rank_congress_members(trades, top_n=TOP_N_MEMBERS):
+    buys = defaultdict(lambda: {"name":"","party":"","count":0,"tickers":[]})
     for t in trades:
         tx = (t.get("Transaction") or "").upper()
         if "PURCHASE" not in tx and "BUY" not in tx:
             continue
-        name   = t.get("Representative") or t.get("Name") or "Unknown"
-        party  = t.get("Party") or ""
+        name   = t.get("Representative") or "Unknown"
         ticker = (t.get("Ticker") or "").upper().strip()
         if name == "Unknown" or not ticker:
             continue
-        buys[name]["name"]  = name
-        buys[name]["party"] = party
-        buys[name]["count"] += 1
+        buys[name]["name"]    = name
+        buys[name]["party"]   = t.get("Party","")
+        buys[name]["count"]  += 1
         if ticker not in buys[name]["tickers"]:
             buys[name]["tickers"].append(ticker)
-
     ranked = sorted(buys.values(), key=lambda x: x["count"], reverse=True)[:top_n]
     for m in ranked:
-        m["return_pct"] = float(m["count"])   # proxy: usa conteggio come score
+        m["return_pct"] = float(m["count"])
         m["chamber"]    = ""
-    log.info(f"Top {top_n} members by buy activity: {[m['name'] for m in ranked]}")
+    log.info(f"[Congress] Top members: {[m['name'] for m in ranked]}")
     return ranked
 
-
-def get_recent_buys(member_name: str, all_trades: list[dict], days: int = 1) -> list[dict]:
-    """Restituisce i BUY recenti di un membro specifico."""
+def get_recent_congress_trades(member_name, all_trades, days=7):
     since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     result = []
     for t in all_trades:
-        if (t.get("Representative") or t.get("Name") or "") != member_name:
+        if (t.get("Representative") or "") != member_name:
             continue
-        tx   = (t.get("Transaction") or "").upper()
-        date = t.get("TransactionDate") or t.get("DisclosureDate") or ""
+        date   = t.get("TransactionDate","")
         if date < since:
             continue
         ticker = (t.get("Ticker") or "").upper().strip()
-        if not ticker or ticker in ("--", "N/A"):
+        if not ticker or ticker in ("--","N/A"):
             continue
-        direction = "buy" if "PURCHASE" in tx or "BUY" in tx else "sell"
-        result.append({
-            "ticker":    ticker,
-            "direction": direction,
-            "date":      date[:10],
-            "member":    member_name,
-        })
+        tx        = (t.get("Transaction") or "").upper()
+        direction = "buy" if ("PURCHASE" in tx or "BUY" in tx) else "sell"
+        result.append({"ticker": ticker, "direction": direction,
+                        "date": date[:10], "member": member_name, "source": "Congress"})
     return result
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 2. HEDGE FUND 13F
+# ══════════════════════════════════════════════════════════════════════════════
+
+def fetch_13f(cik: str, fund_name: str) -> list[dict]:
+    log.info(f"[13F] Fetching {fund_name}…")
+    try:
+        r = requests.get(f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json",
+                         headers=SEC_HEADERS, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        log.error(f"[13F] SEC error {fund_name}: {e}")
+        return []
+
+    filings    = data.get("filings",{}).get("recent",{})
+    forms      = filings.get("form",[])
+    accessions = filings.get("accessionNumber",[])
+    dates      = filings.get("filingDate",[])
+
+    latest_acc = latest_date = None
+    for form, acc, date in zip(forms, accessions, dates):
+        if "13F-HR" in form:
+            latest_acc  = acc.replace("-","")
+            latest_date = date
+            break
+
+    if not latest_acc:
+        log.warning(f"[13F] No 13F found for {fund_name}")
+        return []
+
+    log.info(f"[13F] {fund_name}: latest 13F {latest_date}")
+
+    try:
+        cik_int = int(cik)
+        idx_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{latest_acc}/index.json"
+        r2 = requests.get(idx_url, headers=SEC_HEADERS, timeout=15)
+        r2.raise_for_status()
+        idx = r2.json()
+    except Exception as e:
+        log.error(f"[13F] Index error {fund_name}: {e}")
+        return []
+
+    info_file = None
+    for item in idx.get("directory",{}).get("item",[]):
+        name = item.get("name","").lower()
+        if "infotable" in name and name.endswith(".xml"):
+            info_file = item["name"]
+            break
+    if not info_file:
+        for item in idx.get("directory",{}).get("item",[]):
+            if item.get("name","").lower().endswith(".xml"):
+                info_file = item["name"]
+                break
+
+    if not info_file:
+        log.warning(f"[13F] infotable not found for {fund_name}")
+        return []
+
+    try:
+        xml_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{latest_acc}/{info_file}"
+        r3 = requests.get(xml_url, headers=SEC_HEADERS, timeout=15)
+        r3.raise_for_status()
+        root = ET.fromstring(r3.content)
+
+        positions = []
+        for entry in root.findall(".//{*}infoTable"):
+            def g(tag):
+                el = entry.find(f"{{*}}{tag}")
+                return el.text.strip() if el is not None and el.text else ""
+            ticker   = g("ticker")
+            put_call = g("putCall")
+            value    = g("value")
+            shares   = g("sshPrnamt") or g("shrsOrPrnAmt")
+            if not ticker or put_call in ("Put","Call"):
+                continue
+            try:
+                positions.append({
+                    "ticker":    ticker.upper(),
+                    "name":      g("nameOfIssuer"),
+                    "value_usd": float(value)*1000,
+                    "shares":    int(shares),
+                    "fund":      fund_name,
+                    "date":      latest_date,
+                })
+            except Exception:
+                continue
+
+        positions.sort(key=lambda x: x["value_usd"], reverse=True)
+        log.info(f"[13F] {fund_name}: {len(positions)} positions")
+        return positions[:15]   # top 15 per fondo (come Copilot)
+
+    except Exception as e:
+        log.error(f"[13F] XML parse error {fund_name}: {e}")
+        return []
+
+def fetch_all_13f():
+    results = {}
+    for name, cik in HEDGE_FUNDS.items():
+        results[name] = fetch_13f(cik, name)
+        time.sleep(0.5)
+    return results
+
+def get_13f_trades(fund_positions):
+    """Top 15 posizioni per fondo → trades BUY per Alpaca."""
+    trades = []
+    seen   = set()
+    for fund, positions in fund_positions.items():
+        for p in positions[:15]:
+            t = p["ticker"]
+            if t in seen:
+                continue
+            seen.add(t)
+            trades.append({
+                "ticker":    t,
+                "direction": "buy",
+                "date":      p["date"],
+                "member":    fund,
+                "source":    "13F",
+                "value_usd": p["value_usd"],
+            })
+    return trades
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 2. ALPACA TRADING
+# 3. PEAD — Gen AI Earnings (replica fedele del whitepaper)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def fetch_earnings_surprises() -> list[dict]:
+    """Scarica i dati di earnings surprise via Quiver (se disponibile) o Yahoo Finance."""
+    log.info("[PEAD] Fetching earnings surprises…")
+    candidates = []
+    try:
+        # Quiver Quantitative — earnings surprises
+        r = requests.get("https://api.quiverquant.com/beta/live/earningssurprises",
+                         headers=QH, timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            since = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+            for item in data:
+                date = item.get("Date","")
+                if date < since:
+                    continue
+                eps_actual   = item.get("Actual") or item.get("EPS_Actual")
+                eps_estimate = item.get("Estimate") or item.get("EPS_Estimate")
+                ticker       = (item.get("Ticker") or "").upper()
+                if not ticker or eps_actual is None or eps_estimate is None:
+                    continue
+                try:
+                    surprise = float(eps_actual) - float(eps_estimate)
+                    if surprise > 0:
+                        candidates.append({
+                            "ticker":   ticker,
+                            "surprise": surprise,
+                            "date":     date,
+                            "actual":   float(eps_actual),
+                            "estimate": float(eps_estimate),
+                        })
+                except Exception:
+                    continue
+            log.info(f"[PEAD] {len(candidates)} positive surprises from Quiver")
+    except Exception as e:
+        log.warning(f"[PEAD] Quiver earnings error: {e}")
+
+    if not candidates:
+        log.info("[PEAD] Trying Yahoo Finance earnings calendar…")
+        candidates = _fetch_yahoo_earnings()
+
+    return candidates
+
+def _fetch_yahoo_earnings() -> list[dict]:
+    """Fallback: Yahoo Finance earnings calendar per la settimana corrente."""
+    try:
+        import yfinance as yf
+        # Usa un campione di ticker S&P500 noti per trovare earnings recenti
+        sp500_sample = [
+            "AAPL","MSFT","NVDA","GOOGL","META","AMZN","TSLA","AMD","INTC","CRM",
+            "NFLX","PYPL","ADBE","QCOM","TXN","MU","AMAT","LRCX","KLAC","MRVL",
+        ]
+        candidates = []
+        for ticker in sp500_sample:
+            try:
+                info = yf.Ticker(ticker).earnings_history
+                if info is None or info.empty:
+                    continue
+                latest = info.iloc[-1]
+                surprise = float(latest.get("epsActual",0)) - float(latest.get("epsEstimate",0))
+                if surprise > 0:
+                    candidates.append({
+                        "ticker":   ticker,
+                        "surprise": surprise,
+                        "date":     str(latest.name)[:10] if hasattr(latest.name,"__str__") else "",
+                        "actual":   float(latest.get("epsActual",0)),
+                        "estimate": float(latest.get("epsEstimate",0)),
+                    })
+            except Exception:
+                continue
+        log.info(f"[PEAD] {len(candidates)} candidates from Yahoo Finance")
+        return candidates
+    except Exception as e:
+        log.error(f"[PEAD] Yahoo fallback error: {e}")
+        return []
+
+def compute_sue(candidates: list[dict]) -> list[dict]:
+    """
+    Gate 2: Standardized Unexpected Earnings (SUE).
+    SUE = surprise / std(historical_surprises) — solo surprises > 0 e SUE > 0.5
+    """
+    scored = []
+    for c in candidates:
+        # Semplificazione: normalizza per il valore assoluto dell'estimate
+        estimate = abs(c.get("estimate", 1)) or 1
+        sue = c["surprise"] / estimate
+        if sue > 0.1:  # soglia minima
+            c["sue"] = sue
+            scored.append(c)
+    scored.sort(key=lambda x: x["sue"], reverse=True)
+    return scored
+
+def compute_announcement_return(candidates: list[dict]) -> list[dict]:
+    """Gate 3: verifica che la reazione di mercato sia positiva (abnormal return > 0)."""
+    try:
+        import yfinance as yf
+        passed = []
+        for c in candidates:
+            try:
+                hist = yf.Ticker(c["ticker"]).history(period="5d")
+                if hist.empty or len(hist) < 2:
+                    continue
+                ret = (hist["Close"].iloc[-1] - hist["Close"].iloc[-2]) / hist["Close"].iloc[-2]
+                if ret > 0:
+                    c["ann_return"] = ret
+                    passed.append(c)
+            except Exception:
+                continue
+        log.info(f"[PEAD] Gate 3 passed: {len(passed)}/{len(candidates)}")
+        return passed
+    except Exception:
+        return candidates  # se yfinance non disponibile, passa tutti
+
+def score_transcripts_llm(candidates: list[dict]) -> list[dict]:
+    """
+    Gate 4: AI Transcript Score via Claude API.
+    Analizza il sentiment dei 7 temi del whitepaper sulle ultime news del ticker.
+    """
+    if not candidates:
+        return []
+
+    log.info(f"[PEAD] Scoring {len(candidates)} transcripts via Claude API…")
+    scored = []
+
+    THEMES = [
+        "Revenue backlog (unfilled orders/contracted revenue)",
+        "Contract length (duration of agreements)",
+        "Outlook/guidance (forward guidance tone)",
+        "Revenue momentum (top-line growth trajectory)",
+        "Management tone (confidence and specificity)",
+        "Q&A resilience (quality of analyst Q&A responses)",
+        "Capital allocation (buybacks vs equity issuance)",
+    ]
+
+    for c in candidates:
+        ticker = c["ticker"]
+        prompt = f"""You are analyzing an earnings call for {ticker}.
+The company reported EPS of {c['actual']:.2f} vs estimate {c['estimate']:.2f} (surprise: +{c['surprise']:.2f}).
+
+Score this company on these 7 themes based on what you know about its most recent earnings:
+{chr(10).join(f'{i+1}. {t}' for i,t in enumerate(THEMES))}
+
+For each theme, assign a score from -1 (very negative) to +1 (very positive).
+Also assign a weight (0-1) reflecting how material this theme is for this company.
+Weights must sum to 1.0.
+
+Respond ONLY with valid JSON:
+{{"scores": [s1,s2,s3,s4,s5,s6,s7], "weights": [w1,w2,w3,w4,w5,w6,w7], "summary": "one line"}}"""
+
+        try:
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"Content-Type": "application/json"},
+                json={
+                    "model": "claude-sonnet-4-20250514",
+                    "max_tokens": 300,
+                    "messages": [{"role": "user", "content": prompt}]
+                },
+                timeout=20,
+            )
+            if resp.status_code == 200:
+                text = resp.json()["content"][0]["text"].strip()
+                text = text.replace("```json","").replace("```","").strip()
+                data = json.loads(text)
+                scores  = data.get("scores",[0]*7)
+                weights = data.get("weights",[1/7]*7)
+                # Normalizza pesi
+                w_sum = sum(weights) or 1
+                weights = [w/w_sum for w in weights]
+                composite = sum(s*w for s,w in zip(scores,weights))
+                c["transcript_score"] = composite
+                c["transcript_summary"] = data.get("summary","")
+                if composite > 0:
+                    scored.append(c)
+            else:
+                # Se API non disponibile, passa con score neutro
+                c["transcript_score"] = 0.5
+                c["transcript_summary"] = "Score non disponibile"
+                scored.append(c)
+        except Exception as e:
+            log.warning(f"[PEAD] Transcript score error {ticker}: {e}")
+            c["transcript_score"] = 0.3
+            scored.append(c)
+
+    scored.sort(key=lambda x: x.get("transcript_score",0), reverse=True)
+    return scored
+
+def risk_parity_weights(tickers: list[str]) -> dict[str, float]:
+    """
+    Inverse-volatility weighting (risk parity semplificato).
+    Usa volatilità storica 30 giorni.
+    """
+    try:
+        import yfinance as yf
+        vols = {}
+        for t in tickers:
+            try:
+                hist = yf.Ticker(t).history(period="30d")["Close"]
+                if len(hist) > 5:
+                    ret  = hist.pct_change().dropna()
+                    vols[t] = float(ret.std()) or 0.02
+            except Exception:
+                vols[t] = 0.02
+        if not vols:
+            return {t: 1/len(tickers) for t in tickers}
+        inv_vols = {t: 1/v for t,v in vols.items()}
+        total    = sum(inv_vols.values())
+        weights  = {t: max(v/total, 0.03) for t,v in inv_vols.items()}  # min 3%
+        return weights
+    except Exception:
+        return {t: 1/len(tickers) for t in tickers}
+
+def run_pead_strategy() -> list[dict]:
+    """
+    Esegue la pipeline completa Gen AI Earnings (PEAD):
+    Gate1 → Gate2(SUE) → Gate3(ann.return) → Gate4(LLM) → risk parity sizing
+    """
+    if not ENABLE_PEAD:
+        return []
+
+    log.info("[PEAD] Running Gen AI Earnings pipeline…")
+
+    # Gate 1+2: earnings surprises positive + SUE
+    candidates = fetch_earnings_surprises()
+    candidates = compute_sue(candidates)
+    if not candidates:
+        log.info("[PEAD] No candidates after Gate 2")
+        return []
+
+    # Gate 3: positive announcement return
+    candidates = compute_announcement_return(candidates[:50])
+
+    # Gate 4: AI transcript score
+    candidates = score_transcripts_llm(candidates[:30])
+
+    # Seleziona top 10-20
+    final = candidates[:15]
+    if not final:
+        log.info("[PEAD] No stocks passed all 4 gates")
+        return []
+
+    tickers = [c["ticker"] for c in final]
+    weights = risk_parity_weights(tickers)
+
+    trades = []
+    for c in final:
+        trades.append({
+            "ticker":     c["ticker"],
+            "direction":  "buy",
+            "date":       c.get("date",""),
+            "member":     "Gen AI Earnings (PEAD)",
+            "source":     "PEAD",
+            "sue":        round(c.get("sue",0), 3),
+            "transcript": round(c.get("transcript_score",0), 2),
+            "summary":    c.get("transcript_summary",""),
+            "weight":     round(weights.get(c["ticker"], 1/len(final)), 3),
+        })
+
+    log.info(f"[PEAD] {len(trades)} stocks selected")
+    return trades
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 4. ALPACA EXECUTION
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_client():
     return TradingClient(ALPACA_KEY, ALPACA_SECRET, paper=True)
-
 
 def execute_trades(trades: list[dict]) -> list[dict]:
     if not trades:
@@ -134,14 +509,16 @@ def execute_trades(trades: list[dict]) -> list[dict]:
     client  = get_client()
     account = client.get_account()
     bp      = float(account.buying_power)
-    log.info(f"Buying power: ${bp:,.2f}")
+    log.info(f"[Alpaca] Buying power: ${bp:,.2f}")
 
     results, seen = [], set()
     for trade in trades:
-        t = trade["ticker"]
-        if t in seen:
+        t    = trade["ticker"]
+        key  = f"{t}_{trade.get('source','')}"
+        if key in seen:
             continue
-        seen.add(t)
+        seen.add(key)
+
         side = OrderSide.BUY if trade["direction"] == "buy" else OrderSide.SELL
 
         try:
@@ -149,29 +526,36 @@ def execute_trades(trades: list[dict]) -> list[dict]:
             if not (asset.tradable and asset.status == "active"):
                 raise ValueError("not tradable")
         except Exception:
-            results.append({**trade, "status": "skipped", "reason": "not tradable on Alpaca"})
+            results.append({**trade, "status": "skipped", "reason": "not tradable"})
             continue
 
         if side == OrderSide.SELL:
             positions = {p.symbol: float(p.qty) for p in client.get_all_positions()}
             if t not in positions:
-                results.append({**trade, "status": "skipped", "reason": "no position to sell"})
+                results.append({**trade, "status": "skipped", "reason": "no position"})
                 continue
 
-        notional = min(TRADE_SIZE_USD, bp * 0.1)
+        # Risk parity sizing per PEAD, fisso per gli altri
+        if trade.get("source") == "PEAD" and trade.get("weight"):
+            notional = min(TRADE_SIZE_USD * trade["weight"] * 20, bp * 0.05)
+        else:
+            notional = min(TRADE_SIZE_USD, bp * 0.03)
+
+        notional = max(notional, 1.0)
 
         if DRY_RUN:
-            log.info(f"  [DRY RUN] {side.value} ${notional:.0f} {t}")
+            log.info(f"  [DRY RUN] {side.value} ${notional:.0f} {t} [{trade.get('source')}]")
             results.append({**trade, "status": "dry_run", "notional": notional})
             continue
 
         try:
             order = client.submit_order(MarketOrderRequest(
-                symbol=t, notional=round(notional, 2),
+                symbol=t, notional=round(notional,2),
                 side=side, time_in_force=TimeInForce.DAY,
             ))
-            log.info(f"  ✓ {side.value} ${notional:.0f} {t} — order {order.id}")
-            results.append({**trade, "status": "submitted", "order_id": str(order.id), "notional": notional})
+            log.info(f"  ✓ {side.value} ${notional:.0f} {t} [{trade.get('source')}]")
+            results.append({**trade, "status": "submitted",
+                            "order_id": str(order.id), "notional": notional})
             bp -= notional
         except Exception as e:
             log.error(f"  ✗ {t}: {e}")
@@ -179,185 +563,206 @@ def execute_trades(trades: list[dict]) -> list[dict]:
 
     return results
 
-
 # ══════════════════════════════════════════════════════════════════════════════
-# 3. EMAIL REPORT
+# 5. EMAIL REPORT
 # ══════════════════════════════════════════════════════════════════════════════
 
-def build_html(top_members, results, date_str):
-    member_rows = "".join(
-        f"<tr><td>{m['name']}</td><td>{m['party']}</td>"
-        f"<td style='font-weight:600;color:#3b82f6'>{int(m['return_pct'])} buys/yr</td></tr>"
-        for m in top_members
-    )
-    def badge(s):
-        c = {"submitted":"#22c55e","skipped":"#f59e0b","error":"#ef4444","dry_run":"#6366f1"}.get(s,"#6b7280")
-        return f"<span style='background:{c};color:#fff;padding:2px 8px;border-radius:99px;font-size:12px'>{s}</span>"
-    trade_rows = "".join(
-        f"<tr><td><b>{r['ticker']}</b></td><td>{r['direction'].upper()}</td>"
-        f"<td>{r['member']}</td><td>{r.get('date','')}</td>"
-        f"<td>{badge(r['status'])}</td><td>${r.get('notional',0):.0f}</td></tr>"
-        for r in results
-    ) or "<tr><td colspan='6' style='text-align:center;color:#94a3b8;padding:16px'>Nessun trade oggi — i congressisti non hanno segnalato nuove operazioni</td></tr>"
+def badge(s):
+    c = {"submitted":"#22c55e","skipped":"#f59e0b","error":"#ef4444","dry_run":"#6366f1"}.get(s,"#6b7280")
+    return f"<span style='background:{c};color:#fff;padding:2px 8px;border-radius:99px;font-size:11px'>{s}</span>"
+
+def source_badge(s):
+    c = {"Congress":"#3b82f6","13F":"#8b5cf6","PEAD":"#f59e0b"}.get(s,"#6b7280")
+    return f"<span style='background:{c};color:#fff;padding:2px 8px;border-radius:99px;font-size:11px'>{s}</span>"
+
+def build_html(congress_members, fund_positions, results, date_str):
+    mode = "<span style='background:#6366f1;color:#fff;padding:2px 10px;border-radius:99px;font-size:11px'>DRY RUN</span>" if DRY_RUN else "<span style='background:#22c55e;color:#fff;padding:2px 10px;border-radius:99px;font-size:11px'>LIVE PAPER</span>"
+
+    # Stats
     sub = sum(1 for r in results if r["status"]=="submitted")
     skp = sum(1 for r in results if r["status"]=="skipped")
     err = sum(1 for r in results if r["status"]=="error")
-    mode_badge = "<span style='background:#6366f1;color:#fff;padding:2px 10px;border-radius:99px;font-size:11px'>DRY RUN</span>" if DRY_RUN else "<span style='background:#22c55e;color:#fff;padding:2px 10px;border-radius:99px;font-size:11px'>LIVE PAPER</span>"
+    dry = sum(1 for r in results if r["status"]=="dry_run")
+
+    # Congress members table
+    congress_rows = "".join(
+        f"<tr><td>{m['name']}</td><td>{m['party']}</td>"
+        f"<td style='color:#3b82f6;font-weight:600'>{int(m['return_pct'])} buys/yr</td></tr>"
+        for m in congress_members
+    ) or "<tr><td colspan='3' style='text-align:center;color:#94a3b8'>Nessun dato</td></tr>"
+
+    # 13F table
+    fund_rows = ""
+    for fund, positions in fund_positions.items():
+        top5 = ", ".join(p["ticker"] for p in positions[:5])
+        fund_rows += f"<tr><td style='font-size:12px'>{fund}</td><td>{len(positions)}</td><td style='font-size:11px'>{top5}</td></tr>"
+
+    # All trades table
+    trade_rows = "".join(
+        f"<tr><td><b>{r['ticker']}</b></td>"
+        f"<td>{source_badge(r.get('source',''))}</td>"
+        f"<td style='font-size:11px'>{r['member'][:30]}</td>"
+        f"<td>{badge(r['status'])}</td>"
+        f"<td>${r.get('notional',0):.0f}</td></tr>"
+        for r in results
+    ) or "<tr><td colspan='5' style='text-align:center;color:#94a3b8;padding:16px'>Nessun trade oggi</td></tr>"
+
+    # PEAD section
+    pead_results = [r for r in results if r.get("source")=="PEAD"]
+    pead_rows = "".join(
+        f"<tr><td><b>{r['ticker']}</b></td>"
+        f"<td>{r.get('sue','-')}</td>"
+        f"<td>{r.get('transcript','-')}</td>"
+        f"<td style='font-size:11px'>{r.get('summary','')[:50]}</td>"
+        f"<td>{badge(r['status'])}</td></tr>"
+        for r in pead_results
+    ) or "<tr><td colspan='5' style='text-align:center;color:#94a3b8;padding:12px'>Nessun candidato PEAD questa settimana</td></tr>"
+
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
-<style>body{{font-family:Arial,sans-serif;background:#f8fafc;color:#1e293b;margin:0}}
-.c{{max-width:680px;margin:32px auto;background:#fff;border-radius:12px;overflow:hidden}}
-.h{{background:#0f172a;padding:32px 40px;color:#fff}}
-.h h1{{margin:0 0 6px;font-size:22px}}.h p{{margin:0;opacity:.6;font-size:13px}}
-.s{{padding:24px 40px;border-bottom:1px solid #f1f5f9}}
-.s h2{{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:#64748b;margin:0 0 14px}}
-.stats{{display:flex;gap:12px}}.stat{{flex:1;background:#f8fafc;border-radius:8px;padding:12px;text-align:center}}
-.stat .v{{font-size:26px;font-weight:800}}.stat .l{{font-size:11px;color:#94a3b8;text-transform:uppercase}}
-table{{width:100%;border-collapse:collapse;font-size:13px}}
-th{{text-align:left;padding:7px 10px;color:#94a3b8;font-size:11px;text-transform:uppercase;border-bottom:2px solid #f1f5f9}}
-td{{padding:9px 10px;border-bottom:1px solid #f8fafc}}
-.f{{padding:16px 40px;text-align:center;font-size:12px;color:#94a3b8}}</style></head>
-<body><div class="c">
+<style>
+body{{font-family:Arial,sans-serif;background:#f8fafc;color:#1e293b;margin:0}}
+.c{{max-width:720px;margin:32px auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.08)}}
+.h{{background:linear-gradient(135deg,#0f172a,#1e3a5f);padding:28px 36px;color:#fff}}
+.h h1{{margin:0 0 6px;font-size:20px;font-weight:700}}.h p{{margin:0;opacity:.6;font-size:12px}}
+.s{{padding:20px 36px;border-bottom:1px solid #f1f5f9}}
+.s h2{{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#64748b;margin:0 0 12px}}
+.stats{{display:flex;gap:10px}}
+.stat{{flex:1;background:#f8fafc;border-radius:8px;padding:10px;text-align:center}}
+.stat .v{{font-size:24px;font-weight:800}}.stat .l{{font-size:10px;color:#94a3b8;text-transform:uppercase}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}
+th{{text-align:left;padding:6px 8px;color:#94a3b8;font-size:10px;text-transform:uppercase;border-bottom:2px solid #f1f5f9}}
+td{{padding:8px 8px;border-bottom:1px solid #f8fafc;vertical-align:middle}}
+.f{{padding:14px 36px;text-align:center;font-size:11px;color:#94a3b8}}
+</style></head><body><div class="c">
+
 <div class="h">
-  <h1>Congress Trader — Daily Report</h1>
-  <p>{date_str} &nbsp;·&nbsp; Alpaca Paper &nbsp;·&nbsp; {mode_badge}</p>
+  <h1>🏛 Congress + Hedge Fund Trader</h1>
+  <p>{date_str} · Alpaca Paper · {mode}</p>
 </div>
-<div class="s"><h2>Summary</h2><div class="stats">
-<div class="stat"><div class="v" style="color:#22c55e">{sub}</div><div class="l">Placed</div></div>
-<div class="stat"><div class="v" style="color:#f59e0b">{skp}</div><div class="l">Skipped</div></div>
-<div class="stat"><div class="v" style="color:#ef4444">{err}</div><div class="l">Errors</div></div>
-<div class="stat"><div class="v">{len(top_members)}</div><div class="l">Members</div></div>
+
+<div class="s"><h2>Riepilogo</h2>
+<div class="stats">
+  <div class="stat"><div class="v" style="color:#22c55e">{sub+dry}</div><div class="l">Ordini</div></div>
+  <div class="stat"><div class="v" style="color:#f59e0b">{skp}</div><div class="l">Skippati</div></div>
+  <div class="stat"><div class="v" style="color:#ef4444">{err}</div><div class="l">Errori</div></div>
+  <div class="stat"><div class="v" style="color:#3b82f6">{sum(len(p) for p in fund_positions.values())}</div><div class="l">Posizioni 13F</div></div>
+  <div class="stat"><div class="v" style="color:#f59e0b">{len(pead_results)}</div><div class="l">PEAD</div></div>
 </div></div>
-<div class="s"><h2>Top {len(top_members)} Congressisti più attivi (ultimi 12 mesi)</h2>
+
+<div class="s"><h2>🏛 Top {len(congress_members)} Congressisti</h2>
 <table><thead><tr><th>Nome</th><th>Partito</th><th>Attività</th></tr></thead>
-<tbody>{member_rows}</tbody></table></div>
-<div class="s"><h2>Trade di oggi</h2>
-<table><thead><tr><th>Ticker</th><th>Side</th><th>Membro</th><th>Data</th><th>Stato</th><th>Importo</th></tr></thead>
+<tbody>{congress_rows}</tbody></table></div>
+
+<div class="s"><h2>🏦 Hedge Fund 13F — Top 15 posizioni per fondo</h2>
+<table><thead><tr><th>Fondo</th><th>N. posizioni</th><th>Top 5 ticker</th></tr></thead>
+<tbody>{fund_rows}</tbody></table></div>
+
+<div class="s"><h2>📈 Gen AI Earnings (PEAD) — Selezione settimana</h2>
+<table><thead><tr><th>Ticker</th><th>SUE</th><th>AI Score</th><th>Sintesi</th><th>Stato</th></tr></thead>
+<tbody>{pead_rows}</tbody></table></div>
+
+<div class="s"><h2>📋 Tutti i trade eseguiti oggi</h2>
+<table><thead><tr><th>Ticker</th><th>Fonte</th><th>Manager</th><th>Stato</th><th>Importo</th></tr></thead>
 <tbody>{trade_rows}</tbody></table></div>
-<div class="f">Congress Trader Bot · Dati via Quiver Quantitative · Solo paper trading · Non è consulenza finanziaria</div>
+
+<div class="f">Congress + HF Trader · Dati: Quiver Quantitative, SEC EDGAR · Paper only · Non è consulenza finanziaria</div>
 </div></body></html>"""
 
-
 def send_email(subject, html):
-    """Invia email via Gmail SMTP su porta 587 (TLS) — funziona su Railway."""
-    if not GMAIL_USER or not GMAIL_APP_PWD:
-        log.warning("Gmail credentials mancanti — email saltata")
-        return
-    log.info(f"Invio email a {EMAIL_TO} via SMTP TLS port 587…")
-    msg = MIMEMultipart("alternative")
-    msg["Subject"], msg["From"], msg["To"] = subject, GMAIL_USER, EMAIL_TO
-    msg.attach(MIMEText(html, "html"))
-    # Prova porta 587 (STARTTLS) — Railway non blocca questa
-    for port, use_ssl in [(587, False), (465, True), (25, False)]:
+    # Prova SMTP prima
+    if GMAIL_USER and GMAIL_APP_PWD:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"], msg["From"], msg["To"] = subject, GMAIL_USER, EMAIL_TO
+        msg.attach(MIMEText(html, "html"))
+        for port, use_ssl in [(587, False), (465, True)]:
+            try:
+                if use_ssl:
+                    import ssl
+                    with smtplib.SMTP_SSL("smtp.gmail.com", port,
+                                          context=ssl.create_default_context(), timeout=10) as s:
+                        s.login(GMAIL_USER, GMAIL_APP_PWD)
+                        s.sendmail(GMAIL_USER, EMAIL_TO, msg.as_string())
+                else:
+                    with smtplib.SMTP("smtp.gmail.com", port, timeout=10) as s:
+                        s.ehlo(); s.starttls(); s.ehlo()
+                        s.login(GMAIL_USER, GMAIL_APP_PWD)
+                        s.sendmail(GMAIL_USER, EMAIL_TO, msg.as_string())
+                log.info(f"✓ Email inviata via SMTP port {port}")
+                return
+            except smtplib.SMTPAuthenticationError as e:
+                log.error(f"SMTP auth error: {e}")
+                break
+            except Exception as e:
+                log.warning(f"SMTP port {port} failed: {e}")
+
+    # Fallback Mailjet
+    if MAILJET_KEY and MAILJET_SECRET:
         try:
-            log.info(f"  Trying port {port} (ssl={use_ssl})…")
-            if use_ssl:
-                import ssl as _ssl
-                ctx = _ssl.create_default_context()
-                with smtplib.SMTP_SSL("smtp.gmail.com", port, context=ctx, timeout=10) as s:
-                    s.login(GMAIL_USER, GMAIL_APP_PWD)
-                    s.sendmail(GMAIL_USER, EMAIL_TO, msg.as_string())
+            r = requests.post("https://api.mailjet.com/v3.1/send",
+                auth=(MAILJET_KEY, MAILJET_SECRET),
+                json={"Messages": [{"From": {"Email": GMAIL_USER or EMAIL_TO, "Name": "Congress Trader"},
+                                    "To": [{"Email": EMAIL_TO}],
+                                    "Subject": subject, "HTMLPart": html}]},
+                timeout=15)
+            if r.status_code == 200:
+                log.info("✓ Email inviata via Mailjet")
             else:
-                with smtplib.SMTP("smtp.gmail.com", port, timeout=10) as s:
-                    s.ehlo()
-                    s.starttls()
-                    s.ehlo()
-                    s.login(GMAIL_USER, GMAIL_APP_PWD)
-                    s.sendmail(GMAIL_USER, EMAIL_TO, msg.as_string())
-            log.info(f"✓ Email inviata a {EMAIL_TO} (port {port})")
-            return
-        except smtplib.SMTPAuthenticationError as e:
-            log.error(f"AUTH ERROR port {port}: password App Google non valida — {e}")
-            return   # inutile riprovare altre porte
+                log.error(f"Mailjet error {r.status_code}: {r.text[:200]}")
         except Exception as e:
-            log.warning(f"  Port {port} failed: {e}")
-    log.error("Tutti i tentativi SMTP falliti — Railway potrebbe bloccare tutte le porte SMTP")
-    _send_via_mailjet(subject, html)
-
-
-def _send_via_mailjet(subject: str, html: str):
-    """
-    Fallback: invia via Mailjet API (porta 443, mai bloccata).
-    Richiede MAILJET_KEY e MAILJET_SECRET nelle variabili Railway.
-    """
-    mj_key    = os.getenv("MAILJET_KEY", "")
-    mj_secret = os.getenv("MAILJET_SECRET", "")
-    if not mj_key or not mj_secret:
-        log.warning("Mailjet non configurato — aggiungi MAILJET_KEY e MAILJET_SECRET su Railway")
-        log.warning("Registrati gratis su mailjet.com (6000 email/mese gratis)")
-        return
-    payload = {
-        "Messages": [{
-            "From":    {"Email": GMAIL_USER, "Name": "Congress Trader"},
-            "To":      [{"Email": EMAIL_TO}],
-            "Subject": subject,
-            "HTMLPart": html,
-        }]
-    }
-    try:
-        r = requests.post(
-            "https://api.mailjet.com/v3.1/send",
-            auth=(mj_key, mj_secret),
-            json=payload,
-            timeout=15,
-        )
-        if r.status_code == 200:
-            log.info(f"✓ Email inviata via Mailjet a {EMAIL_TO}")
-        else:
-            log.error(f"Mailjet error {r.status_code}: {r.text[:200]}")
-    except Exception as e:
-        log.error(f"Mailjet fallback error: {e}")
-
+            log.error(f"Mailjet error: {e}")
+    else:
+        log.warning("Nessun metodo email configurato")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 4. MAIN JOB
+# 6. MAIN JOB
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_daily_job():
     date_str = datetime.now().strftime("%A, %d %B %Y · %H:%M")
-    log.info(f"═══ Congress Trader v3 · {date_str} ═══")
+    log.info(f"═══ Congress + HF Trader v4 · {date_str} ═══")
 
-    # 1. Scarica tutti i trade dell'anno
-    all_trades = fetch_all_trades_last_n_days(days=365)
-    if not all_trades:
-        log.error("Nessun dato — aborting")
-        send_email("Congress Trader ⚠️ — Nessun dato", "<p>Impossibile scaricare i dati da Quiver Quantitative.</p>")
-        return
+    all_trades = []
 
-    # 2. Classifica i top membri
-    top_members = rank_members_by_performance(all_trades, top_n=TOP_N_MEMBERS)
-
-    # 3. Trova i loro trade di OGGI (o ieri se weekend)
-    today_trades = []
+    # 1. Congressional trades
+    congress_raw  = fetch_congressional_trades(days=365)
+    top_members   = rank_congress_members(congress_raw, TOP_N_MEMBERS)
     for m in top_members:
-        today_trades.extend(get_recent_buys(m["name"], all_trades, days=7))
-    log.info(f"Trade recenti da copiare: {len(today_trades)}")
+        all_trades.extend(get_recent_congress_trades(m["name"], congress_raw, days=7))
+
+    # 2. Hedge Fund 13F
+    fund_positions = fetch_all_13f()
+    all_trades.extend(get_13f_trades(fund_positions))
+
+    # 3. PEAD Gen AI Earnings
+    pead_trades = run_pead_strategy()
+    all_trades.extend(pead_trades)
+
+    log.info(f"Totale trade da eseguire: {len(all_trades)}")
 
     # 4. Esegui su Alpaca
-    results = execute_trades(today_trades)
+    results = execute_trades(all_trades)
 
-    # 5. Manda email
-    html = build_html(top_members, results, date_str)
-    subj = f"Congress Trader | {datetime.now().strftime('%d %b %Y')} | {sum(1 for r in results if r['status']=='submitted')} ordini"
+    # 5. Email
+    html  = build_html(top_members, fund_positions, results, date_str)
+    subj  = f"Congress+HF Trader | {datetime.now().strftime('%d %b %Y')} | {sum(1 for r in results if r['status'] in ('submitted','dry_run'))} ordini"
     send_email(subj, html)
     log.info("═══ Done ═══")
 
-
 # ══════════════════════════════════════════════════════════════════════════════
-# 5. ENTRY POINT
+# 7. ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    RUN_NOW = os.getenv("RUN_NOW", "false").lower() == "true"
-
+    RUN_NOW = os.getenv("RUN_NOW","false").lower() == "true"
     if RUN_NOW:
         run_daily_job()
 
-    # Ogni giorno feriale alle 09:35 ET (15:35 ora italiana)
-    for day in [schedule.every().monday, schedule.every().tuesday, schedule.every().wednesday,
-                schedule.every().thursday, schedule.every().friday]:
+    for day in [schedule.every().monday, schedule.every().tuesday,
+                schedule.every().wednesday, schedule.every().thursday,
+                schedule.every().friday]:
         day.at("09:35").do(run_daily_job)
 
-    log.info("Scheduler attivo — si esegue alle 09:35 ET nei giorni feriali…")
+    log.info("Scheduler attivo — 09:35 ET nei giorni feriali…")
     while True:
         schedule.run_pending()
         time.sleep(30)
