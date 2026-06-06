@@ -1,17 +1,13 @@
 """
 Script eseguito da GitHub Actions ogni domenica.
-Scarica i 13F da SEC EDGAR e l'earnings calendar da Yahoo Finance.
+Usa sec-api.io (piano gratuito, 100 req/mese) per i 13F.
 Salva i risultati in data/13f_cache.json e data/earnings_cache.json
 """
 
 import json, time, requests, os
 from datetime import datetime, timedelta
-from xml.etree import ElementTree as ET
 
-SEC_HEADERS = {
-    "User-Agent": "CongressTraderBot github-actions@users.noreply.github.com",
-    "Accept":     "application/json",
-}
+SEC_API_KEY = os.environ.get("SEC_API_KEY", "")
 
 FUNDS = {
     "Situational Awareness (Aschenbrenner)": "0002045724",
@@ -19,184 +15,120 @@ FUNDS = {
     "Citadel Advisors (Griffin)":            "0001423053",
 }
 
-# ── 13F ───────────────────────────────────────────────────────────────────────
+# ── 13F via sec-api.io ────────────────────────────────────────────────────────
 
-def fetch_13f(fund_name, cik):
+def fetch_13f_secapi(fund_name: str, cik: str) -> list[dict]:
+    """Fetch top 15 positions via sec-api.io free tier."""
     print(f"Fetching 13F for {fund_name} (CIK {cik})…")
-    cik_padded = cik.zfill(10)
-
-    # 1. Get submissions
-    r = requests.get(
-        f"https://data.sec.gov/submissions/CIK{cik_padded}.json",
-        headers=SEC_HEADERS, timeout=20
-    )
-    if r.status_code != 200:
-        print(f"  ✗ submissions error: {r.status_code}")
+    if not SEC_API_KEY:
+        print("  ✗ SEC_API_KEY not set")
         return []
 
-    data     = r.json()
-    filings  = data.get("filings", {}).get("recent", {})
-    forms    = filings.get("form", [])
-    accs     = filings.get("accessionNumber", [])
-    dates    = filings.get("filingDate", [])
-
-    latest_acc = latest_date = None
-    for form, acc, date in zip(forms, accs, dates):
-        if "13F-HR" in form:
-            latest_acc  = acc.replace("-", "")
-            latest_date = date
-            break
-
-    if not latest_acc:
-        print(f"  ✗ no 13F found")
-        return []
-
-    print(f"  Latest 13F: {latest_date} ({latest_acc})")
-    time.sleep(0.5)
-
-    # 2. Get filing index
-    cik_int = int(cik)
-    idx_url = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik_int}&type=13F-HR&dateb=&owner=include&count=1&search_text="
-    
-    # Use direct archive URL
-    acc_fmt = f"{latest_acc[:10]}-{latest_acc[10:12]}-{latest_acc[12:]}"
-    idx_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{latest_acc}/{acc_fmt}-index.json"
-    
-    r2 = requests.get(idx_url, headers={**SEC_HEADERS, "Accept": "*/*"}, timeout=20)
-    
-    if r2.status_code != 200:
-        # Try alternative index format
-        idx_url2 = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{latest_acc}/index.json"
-        r2 = requests.get(idx_url2, headers={**SEC_HEADERS, "Accept": "*/*"}, timeout=20)
-    
-    if r2.status_code != 200:
-        print(f"  ✗ index error: {r2.status_code} — trying EDGAR full-text search")
-        return _fetch_via_efts(fund_name, cik, latest_date)
+    # Step 1: find latest 13F-HR filing
+    query_url = "https://api.sec-api.io/form-13f"
+    headers   = {"Authorization": SEC_API_KEY, "Content-Type": "application/json"}
+    payload   = {
+        "query": {
+            "query_string": {
+                "query": f'cik:"{cik.lstrip("0")}" AND formType:"13F-HR"'
+            }
+        },
+        "from": "0",
+        "size": "1",
+        "sort": [{"filedAt": {"order": "desc"}}]
+    }
 
     try:
-        idx = r2.json()
-        items = idx.get("directory", {}).get("item", [])
-    except Exception:
-        return _fetch_via_efts(fund_name, cik, latest_date)
+        r = requests.post(query_url, headers=headers, json=payload, timeout=20)
+        if r.status_code != 200:
+            print(f"  ✗ Query error: {r.status_code} — {r.text[:150]}")
+            return []
 
-    # Find infotable XML
-    xml_file = None
-    for item in items:
-        name = item.get("name", "").lower()
-        if "infotable" in name and name.endswith(".xml"):
-            xml_file = item["name"]
-            break
-    if not xml_file:
-        for item in items:
-            if item.get("name", "").lower().endswith(".xml"):
-                xml_file = item["name"]
-                break
+        filings = r.json().get("filings", [])
+        if not filings:
+            print(f"  ✗ No 13F filings found")
+            return []
 
-    if not xml_file:
-        print(f"  ✗ no XML file found")
-        return []
+        filing   = filings[0]
+        filed_at = filing.get("filedAt", "")[:10]
+        period   = filing.get("periodOfReport", filed_at)
+        holdings = filing.get("holdings", [])
 
-    time.sleep(0.5)
-    xml_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{latest_acc}/{xml_file}"
-    r3 = requests.get(xml_url, headers={**SEC_HEADERS, "Accept": "*/*"}, timeout=20)
-    if r3.status_code != 200:
-        print(f"  ✗ XML error: {r3.status_code}")
-        return []
+        print(f"  Filing: {filed_at} | Period: {period} | {len(holdings)} holdings")
 
-    return _parse_infotable(r3.content, fund_name, latest_date)
-
-
-def _fetch_via_efts(fund_name, cik, latest_date):
-    """Fallback: EDGAR full-text search to find the infotable file."""
-    cik_int = int(cik)
-    # Try direct XML URL patterns
-    patterns = [
-        f"https://www.sec.gov/Archives/edgar/data/{cik_int}/",
-    ]
-    # Use EDGAR filing page to find the XML
-    url = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik_int}&type=13F-HR&dateb=&owner=include&count=1&output=atom"
-    r = requests.get(url, headers={"User-Agent": SEC_HEADERS["User-Agent"]}, timeout=15)
-    print(f"  EFTS fallback: {r.status_code}")
-    return []
-
-
-def _parse_infotable(xml_content, fund_name, date):
-    """Parse 13F infotable XML into list of positions."""
-    try:
-        root = ET.fromstring(xml_content)
+        # Filter out options, sort by value
         positions = []
-        for entry in root.findall(".//{*}infoTable"):
-            def g(tag):
-                el = entry.find(f"{{*}}{tag}")
-                return el.text.strip() if el is not None and el.text else ""
-
-            ticker   = g("ticker").upper()
-            put_call = g("putCall")
-            value    = g("value")
-            shares   = g("sshPrnamt") or g("shrsOrPrnAmt")
-            name     = g("nameOfIssuer")
-
-            if not ticker or put_call in ("Put", "Call"):
+        for h in holdings:
+            option = (h.get("putCall") or "").upper()
+            if option in ("PUT", "CALL"):
+                continue
+            ticker = (h.get("cusip") or "")  # sec-api may return cusip not ticker
+            # Try ticker field directly
+            ticker = h.get("ticker") or h.get("nameOfIssuer", "").split()[0]
+            ticker = ticker.upper().strip()
+            if not ticker or len(ticker) > 6:
                 continue
             try:
+                value  = float(h.get("value", 0)) * 1000  # value in $thousands
+                shares = int(h.get("shrsOrPrnAmt", {}).get("sshPrnamt", 0)
+                             if isinstance(h.get("shrsOrPrnAmt"), dict)
+                             else h.get("shares", 0))
                 positions.append({
                     "ticker":    ticker,
-                    "name":      name,
-                    "value_usd": float(value) * 1000,
-                    "shares":    int(shares),
+                    "name":      h.get("nameOfIssuer", ticker),
+                    "value_usd": value,
+                    "shares":    shares,
                     "fund":      fund_name,
-                    "date":      date,
+                    "date":      period,
                 })
             except Exception:
                 continue
 
         positions.sort(key=lambda x: x["value_usd"], reverse=True)
-        print(f"  ✓ {len(positions)} positions parsed, top15: {[p['ticker'] for p in positions[:5]]}")
-        return positions[:15]
+        top15 = positions[:15]
+        print(f"  ✓ Top 15: {[p['ticker'] for p in top15]}")
+        return top15
+
     except Exception as e:
-        print(f"  ✗ XML parse error: {e}")
+        print(f"  ✗ Error: {e}")
         return []
 
 
-# ── EARNINGS ──────────────────────────────────────────────────────────────────
+# ── EARNINGS via Yahoo Finance ────────────────────────────────────────────────
 
-def fetch_earnings_surprises():
-    """Scarica earnings surprises degli ultimi 7 giorni da Yahoo Finance."""
-    print("Fetching earnings surprises…")
+def fetch_earnings_surprises() -> list[dict]:
+    print("Fetching earnings surprises via yfinance…")
     results = []
-
-    # Sample di titoli S&P500 da controllare
     tickers = [
         "AAPL","MSFT","NVDA","GOOGL","META","AMZN","TSLA","AMD","INTC","CRM",
-        "NFLX","PYPL","ADBE","QCOM","TXN","MU","AMAT","LRCX","KLAC","MRVL",
-        "ORCL","SAP","IBM","CSCO","AVGO","NOW","SNOW","PLTR","UBER","LYFT",
-        "SHOP","SQ","COIN","HOOD","RBLX","U","DDOG","ZS","CRWD","NET",
+        "NFLX","ADBE","QCOM","TXN","MU","AMAT","LRCX","MRVL","ORCL","AVGO",
+        "NOW","SNOW","PLTR","UBER","DDOG","ZS","CRWD","NET","ARM","SMCI",
     ]
-
-    import yfinance as yf
-    since = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
-
-    for ticker in tickers:
-        try:
-            t = yf.Ticker(ticker)
-            hist = t.earnings_history
-            if hist is None or hist.empty:
+    try:
+        import yfinance as yf
+        since = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
+        for ticker in tickers:
+            try:
+                hist = yf.Ticker(ticker).earnings_history
+                if hist is None or hist.empty:
+                    continue
+                latest   = hist.iloc[-1]
+                actual   = float(latest.get("epsActual",   0) or 0)
+                estimate = float(latest.get("epsEstimate", 0) or 0)
+                surprise = actual - estimate
+                date_str = str(latest.name)[:10]
+                if surprise > 0 and date_str >= since:
+                    results.append({
+                        "ticker":   ticker,
+                        "surprise": round(surprise, 4),
+                        "actual":   round(actual,   4),
+                        "estimate": round(estimate, 4),
+                        "date":     date_str,
+                    })
+            except Exception:
                 continue
-            latest = hist.iloc[-1]
-            actual   = float(latest.get("epsActual", 0) or 0)
-            estimate = float(latest.get("epsEstimate", 0) or 0)
-            surprise = actual - estimate
-            date_str = str(latest.name)[:10] if hasattr(latest.name, "__str__") else ""
-            if surprise > 0 and date_str >= since:
-                results.append({
-                    "ticker":   ticker,
-                    "surprise": round(surprise, 4),
-                    "actual":   round(actual, 4),
-                    "estimate": round(estimate, 4),
-                    "date":     date_str,
-                })
-        except Exception as e:
-            pass
+    except Exception as e:
+        print(f"  yfinance error: {e}")
 
     print(f"  ✓ {len(results)} positive surprises found")
     return results
@@ -210,22 +142,15 @@ if __name__ == "__main__":
     # 1. Fetch 13F
     cache_13f = {}
     for fund_name, cik in FUNDS.items():
-        positions = fetch_13f(fund_name, cik)
-        cache_13f[fund_name] = positions
-        time.sleep(1)  # rispetta rate limit SEC
+        cache_13f[fund_name] = fetch_13f_secapi(fund_name, cik)
+        time.sleep(1)
 
     with open("data/13f_cache.json", "w") as f:
-        json.dump({
-            "updated_at": datetime.utcnow().isoformat(),
-            "funds": cache_13f,
-        }, f, indent=2)
-    print(f"\n✓ 13F cache saved → data/13f_cache.json")
+        json.dump({"updated_at": datetime.utcnow().isoformat(), "funds": cache_13f}, f, indent=2)
+    print("✓ 13F cache saved → data/13f_cache.json")
 
     # 2. Fetch earnings
     earnings = fetch_earnings_surprises()
     with open("data/earnings_cache.json", "w") as f:
-        json.dump({
-            "updated_at": datetime.utcnow().isoformat(),
-            "surprises": earnings,
-        }, f, indent=2)
-    print(f"✓ Earnings cache saved → data/earnings_cache.json")
+        json.dump({"updated_at": datetime.utcnow().isoformat(), "surprises": earnings}, f, indent=2)
+    print("✓ Earnings cache saved → data/earnings_cache.json")
