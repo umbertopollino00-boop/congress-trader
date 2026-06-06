@@ -165,7 +165,36 @@ def fetch_13f_quiver(fund_name: str, owner_query: str) -> list[dict]:
         log.error(f"[13F] {fund_name} error: {e}")
         return []
 
-def fetch_all_13f():
+GITHUB_RAW = os.getenv("GITHUB_RAW_BASE", "")
+# Format: https://raw.githubusercontent.com/USERNAME/REPO/main
+
+def fetch_all_13f() -> dict:
+    """
+    Legge i dati 13F dal cache JSON aggiornato da GitHub Actions ogni domenica.
+    Fallback su Quiver se il cache non è disponibile.
+    """
+    if GITHUB_RAW:
+        url = f"{GITHUB_RAW}/data/13f_cache.json"
+        try:
+            r = requests.get(url, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                funds = data.get("funds", {})
+                updated = data.get("updated_at", "")[:10]
+                total = sum(len(v) for v in funds.values())
+                log.info(f"[13F] Cache loaded from GitHub (updated {updated}, {total} total positions)")
+                # Ensure all expected funds are present
+                for name in FUND_OWNERS:
+                    if name not in funds:
+                        funds[name] = []
+                return funds
+            else:
+                log.warning(f"[13F] GitHub cache fetch error: {r.status_code}")
+        except Exception as e:
+            log.warning(f"[13F] GitHub cache error: {e}")
+
+    # Fallback: try Quiver
+    log.info("[13F] Falling back to Quiver sec13f endpoint…")
     results = {}
     for name, owner in FUND_OWNERS.items():
         results[name] = fetch_13f_quiver(name, owner)
@@ -228,11 +257,31 @@ def compute_overlap(congress_members, fund_positions) -> list[dict]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def fetch_earnings_surprises() -> list[dict]:
-    """Scarica i dati di earnings surprise via Quiver (se disponibile) o Yahoo Finance."""
+    """
+    Legge i dati di earnings surprise dal cache JSON aggiornato da GitHub Actions.
+    Fallback su Quiver o Yahoo se il cache non è disponibile.
+    """
     log.info("[PEAD] Fetching earnings surprises…")
+
+    # 1. Prova il cache GitHub
+    if GITHUB_RAW:
+        url = f"{GITHUB_RAW}/data/earnings_cache.json"
+        try:
+            r = requests.get(url, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                surprises = data.get("surprises", [])
+                updated   = data.get("updated_at", "")[:10]
+                since     = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
+                recent    = [s for s in surprises if s.get("date","") >= since]
+                log.info(f"[PEAD] {len(recent)} surprises from GitHub cache (updated {updated})")
+                return recent
+        except Exception as e:
+            log.warning(f"[PEAD] GitHub earnings cache error: {e}")
+
+    # 2. Fallback Quiver
     candidates = []
     try:
-        # Quiver Quantitative — earnings surprises
         r = requests.get("https://api.quiverquant.com/beta/live/earningssurprises",
                          headers=QH, timeout=15)
         if r.status_code == 200:
@@ -250,21 +299,16 @@ def fetch_earnings_surprises() -> list[dict]:
                 try:
                     surprise = float(eps_actual) - float(eps_estimate)
                     if surprise > 0:
-                        candidates.append({
-                            "ticker":   ticker,
-                            "surprise": surprise,
-                            "date":     date,
-                            "actual":   float(eps_actual),
-                            "estimate": float(eps_estimate),
-                        })
+                        candidates.append({"ticker": ticker, "surprise": surprise,
+                                           "date": date, "actual": float(eps_actual),
+                                           "estimate": float(eps_estimate)})
                 except Exception:
                     continue
-            log.info(f"[PEAD] {len(candidates)} positive surprises from Quiver")
+            log.info(f"[PEAD] {len(candidates)} surprises from Quiver")
     except Exception as e:
-        log.warning(f"[PEAD] Quiver earnings error: {e}")
+        log.warning(f"[PEAD] Quiver error: {e}")
 
     if not candidates:
-        log.info("[PEAD] Trying Yahoo Finance earnings calendar…")
         candidates = _fetch_yahoo_earnings()
 
     return candidates
