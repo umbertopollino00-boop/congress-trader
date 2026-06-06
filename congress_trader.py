@@ -575,7 +575,59 @@ def source_badge(s):
     c = {"Congress":"#3b82f6","13F":"#8b5cf6","PEAD":"#f59e0b"}.get(s,"#6b7280")
     return f"<span style='background:{c};color:#fff;padding:2px 8px;border-radius:99px;font-size:11px'>{s}</span>"
 
-def build_html(congress_members, fund_positions, results, date_str):
+
+def build_portfolio_section(congress_members, fund_positions) -> str:
+    """Sezione fissa con la composizione completa dei portafogli."""
+
+    # Congressisti: tutti i ticker noti per ciascun membro
+    congress_rows = ""
+    for m in congress_members:
+        tickers = m.get("tickers", [])[:12]
+        if not tickers:
+            continue
+        pills = " ".join(
+            f"<span style='background:#eff6ff;color:#3b82f6;border:1px solid #bfdbfe;"
+            f"padding:1px 6px;border-radius:4px;font-size:11px'>{t}</span>"
+            for t in tickers
+        )
+        congress_rows += (
+            f"<tr><td style='font-size:12px;font-weight:500'>{m['name']}</td>"
+            f"<td style='font-size:11px;color:#64748b'>{m['party']}</td>"
+            f"<td style='line-height:2'>{pills}</td></tr>"
+        )
+
+    congress_section = (
+        "<div class='s'><h2>🏛 Portafoglio Congressisti — Posizioni note</h2>"
+        "<table><thead><tr><th>Nome</th><th>Partito</th><th>Ticker in portafoglio</th></tr></thead>"
+        f"<tbody>{congress_rows or '<tr><td colspan=3 style=text-align:center;color:#94a3b8>Nessun dato</td></tr>'}</tbody>"
+        "</table></div>"
+    )
+
+    # Hedge fund: top 15 posizioni per fondo
+    fund_sections = ""
+    for fund, positions in fund_positions.items():
+        if not positions:
+            continue
+        rows = ""
+        for i, p in enumerate(positions[:15], 1):
+            val_m = p["value_usd"] / 1_000_000
+            rows += (
+                f"<tr><td style='color:#94a3b8;font-size:11px'>{i}</td>"
+                f"<td><b>{p['ticker']}</b></td>"
+                f"<td style='font-size:11px;color:#64748b'>{p['name'][:35]}</td>"
+                f"<td style='color:#22c55e;font-weight:600'>${val_m:.1f}M</td></tr>"
+            )
+        date_label = positions[0]["date"] if positions else "N/A"
+        fund_sections += (
+            f"<div class='s'><h2>🏦 {fund}</h2>"
+            f"<p style='font-size:11px;color:#94a3b8;margin:0 0 10px'>13F al {date_label} — Top 15 posizioni</p>"
+            "<table><thead><tr><th>#</th><th>Ticker</th><th>Società</th><th>Valore</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table></div>"
+        )
+
+    return congress_section + fund_sections
+
+def build_html(congress_members, fund_positions, results, date_str, all_congress_trades=None):
     mode = "<span style='background:#6366f1;color:#fff;padding:2px 10px;border-radius:99px;font-size:11px'>DRY RUN</span>" if DRY_RUN else "<span style='background:#22c55e;color:#fff;padding:2px 10px;border-radius:99px;font-size:11px'>LIVE PAPER</span>"
 
     # Stats
@@ -661,7 +713,7 @@ td{{padding:8px 8px;border-bottom:1px solid #f8fafc;vertical-align:middle}}
 <table><thead><tr><th>Ticker</th><th>SUE</th><th>AI Score</th><th>Sintesi</th><th>Stato</th></tr></thead>
 <tbody>{pead_rows}</tbody></table></div>
 
-<div class="s"><h2>📋 Tutti i trade eseguiti oggi</h2>
+{build_portfolio_section(congress_members, fund_positions)}<div class="s"><h2>📋 Tutti i trade eseguiti oggi</h2>
 <table><thead><tr><th>Ticker</th><th>Fonte</th><th>Manager</th><th>Stato</th><th>Importo</th></tr></thead>
 <tbody>{trade_rows}</tbody></table></div>
 
@@ -743,7 +795,7 @@ def run_daily_job():
     results = execute_trades(all_trades)
 
     # 5. Email
-    html  = build_html(top_members, fund_positions, results, date_str)
+    html  = build_html(top_members, fund_positions, results, date_str, all_congress_trades=congress_raw)
     subj  = f"Congress+HF Trader | {datetime.now().strftime('%d %b %Y')} | {sum(1 for r in results if r['status'] in ('submitted','dry_run'))} ordini"
     send_email(subj, html)
     log.info("═══ Done ═══")
