@@ -38,7 +38,7 @@ def fetch_13f_secapi(fund_name: str, cik: str) -> list[dict]:
 
     try:
         r = requests.post(
-            "https://api.sec-api.io/form-13f",
+            "https://api.sec-api.io/form-13f/holdings",
             headers=headers,
             json=payload,
             timeout=20
