@@ -1,6 +1,6 @@
 """
 Script eseguito da GitHub Actions ogni domenica.
-Usa sec-api.io Query API per i 13F.
+Usa sec-api.io Form 13F API per le holdings istituzionali.
 """
 
 import json, time, requests, os
@@ -14,7 +14,7 @@ FUNDS = {
     "Citadel Advisors (Griffin)":            "1423053",
 }
 
-# ── 13F via sec-api.io Query API ──────────────────────────────────────────────
+# ── 13F via sec-api.io ────────────────────────────────────────────────────────
 
 def fetch_13f_secapi(fund_name: str, cik: str) -> list[dict]:
     print(f"Fetching 13F for {fund_name} (CIK {cik})…")
@@ -22,12 +22,13 @@ def fetch_13f_secapi(fund_name: str, cik: str) -> list[dict]:
         print("  ✗ SEC_API_KEY not set")
         return []
 
-    # Step 1: find latest 13F-HR filing via Query API
     headers = {"Authorization": SEC_API_KEY, "Content-Type": "application/json"}
+
+    # POST to /form-13f with query parameters
     payload = {
         "query": {
             "query_string": {
-                "query": f'cik:"{cik}" AND formType:"13F-HR"'
+                "query": f'cik:"{cik}"'
             }
         },
         "from": "0",
@@ -37,84 +38,50 @@ def fetch_13f_secapi(fund_name: str, cik: str) -> list[dict]:
 
     try:
         r = requests.post(
-            "https://api.sec-api.io",
+            "https://api.sec-api.io/form-13f",
             headers=headers,
             json=payload,
             timeout=20
         )
+        print(f"  Status: {r.status_code}")
         if r.status_code != 200:
-            print(f"  ✗ Query error: {r.status_code} — {r.text[:200]}")
+            print(f"  ✗ Error: {r.text[:300]}")
             return []
 
-        data     = r.json()
-        filings  = data.get("filings", [])
+        data    = r.json()
+        filings = data.get("data", data.get("filings", []))
         if not filings:
-            print(f"  ✗ No filings found")
+            print("  ✗ No filings found")
             return []
 
-        filing      = filings[0]
-        filed_at    = filing.get("filedAt", "")[:10]
-        period      = filing.get("periodOfReport", filed_at)
-        accession   = filing.get("accessionNo", "").replace("-", "")
-        print(f"  Latest 13F: {filed_at} | Period: {period} | Accession: {accession}")
+        filing   = filings[0]
+        filed_at = filing.get("filedAt", "")[:10]
+        period   = filing.get("periodOfReport", filed_at)
+        holdings = filing.get("holdings", [])
+        print(f"  Filing: {filed_at} | Period: {period} | {len(holdings)} holdings")
 
-        if not accession:
-            print("  ✗ No accession number")
-            return []
-
-        # Step 2: fetch holdings via 13F Holdings API
-        time.sleep(0.5)
-        holdings_url = f"https://api.sec-api.io/form-13f/{accession}"
-        r2 = requests.get(holdings_url, headers=headers, timeout=20)
-
-        if r2.status_code != 200:
-            print(f"  ✗ Holdings error: {r2.status_code} — {r2.text[:200]}")
-            return []
-
-        holdings_data = r2.json()
-        holdings = (
-            holdings_data.get("holdings") or
-            holdings_data.get("data", {}).get("holdings") or
-            holdings_data.get("tableData") or
-            []
-        )
-
-        print(f"  {len(holdings)} raw holdings found")
-
-        # Parse positions — filter out options
         positions = []
         for h in holdings:
-            option = (h.get("putCall") or h.get("option") or "").upper()
+            option = (h.get("putCall") or "").upper()
             if option in ("PUT", "CALL"):
                 continue
-
             ticker = (h.get("ticker") or "").upper().strip()
-            name   = h.get("nameOfIssuer") or h.get("issuerName") or ticker
-
-            # value in $thousands
-            raw_value = h.get("value") or h.get("marketValue") or 0
+            if not ticker or len(ticker) > 6:
+                continue
             try:
-                value_usd = float(raw_value) * 1000
+                value_usd = float(h.get("value", 0)) * 1000
+                shares    = int(
+                    h.get("shrsOrPrnAmt", {}).get("sshPrnamt", 0)
+                    if isinstance(h.get("shrsOrPrnAmt"), dict)
+                    else h.get("shares", 0)
+                )
             except Exception:
                 continue
-
-            # shares
-            raw_shares = (
-                h.get("shrsOrPrnAmt", {}).get("sshPrnamt")
-                if isinstance(h.get("shrsOrPrnAmt"), dict)
-                else h.get("shares") or h.get("sharesHeld") or 0
-            )
-            try:
-                shares = int(raw_shares)
-            except Exception:
-                shares = 0
-
-            if not ticker or len(ticker) > 6 or value_usd <= 0:
+            if value_usd <= 0:
                 continue
-
             positions.append({
                 "ticker":    ticker,
-                "name":      name,
+                "name":      h.get("nameOfIssuer", ticker),
                 "value_usd": value_usd,
                 "shares":    shares,
                 "fund":      fund_name,
@@ -166,7 +133,6 @@ def fetch_earnings_surprises() -> list[dict]:
                 continue
     except Exception as e:
         print(f"  yfinance error: {e}")
-
     print(f"  ✓ {len(results)} positive surprises found")
     return results
 
