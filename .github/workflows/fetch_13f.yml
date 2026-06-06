@@ -1,0 +1,35 @@
+name: Fetch 13F & Earnings Data
+
+on:
+  schedule:
+    - cron: '0 6 * * 0'   # ogni domenica alle 06:00 UTC
+  workflow_dispatch:        # eseguibile manualmente dal tab Actions
+
+jobs:
+  fetch-data:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests yfinance pandas
+
+      - name: Fetch 13F and earnings data
+        run: python scripts/fetch_data.py
+
+      - name: Commit updated cache
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git diff --staged --quiet || git commit -m "chore: update 13F + earnings cache $(date -u +%Y-%m-%d)"
+          git push
