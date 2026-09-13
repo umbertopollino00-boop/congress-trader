@@ -1,4 +1,19 @@
 {
-  "updated_at": "2026-09-06T10:34:51.779910",
-  "surprises": []
+  "updated_at": "2026-09-13T11:22:02.929341",
+  "surprises": [
+    {
+      "ticker": "ADBE",
+      "surprise": 0.0434,
+      "actual": 6.13,
+      "estimate": 6.0866,
+      "date": "2026-08-31"
+    },
+    {
+      "ticker": "ORCL",
+      "surprise": 0.1817,
+      "actual": 1.92,
+      "estimate": 1.7383,
+      "date": "2026-08-31"
+    }
+  ]
 }
