@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-11-08T12:58:38.113575",
+  "updated_at": "2026-11-15T13:40:51.863416",
   "funds": {
     "Situational Awareness (Aschenbrenner)": [
       {
@@ -125,124 +125,124 @@
     ],
     "Renaissance Technologies (Simons)": [
       {
-        "ticker": "NVDA",
-        "name": "NVIDIA CORPORATION",
-        "value_usd": 1418869170000.0,
-        "shares": 7091256,
+        "ticker": "MU",
+        "name": "MICRON TECHNOLOGY INC",
+        "value_usd": 1619650963000.0,
+        "shares": 1520639,
         "fund": "Renaissance Technologies (Simons)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
       },
       {
-        "ticker": "META",
-        "name": "META PLATFORMS INC",
-        "value_usd": 1139611745000.0,
-        "shares": 2023153,
+        "ticker": "AMD",
+        "name": "ADVANCED MICRO DEVICES INC",
+        "value_usd": 1205536416000.0,
+        "shares": 1995101,
         "fund": "Renaissance Technologies (Simons)",
-        "date": "2026-06-30"
-      },
-      {
-        "ticker": "INTC",
-        "name": "INTEL CORP",
-        "value_usd": 1022356867000.0,
-        "shares": 7321928,
-        "fund": "Renaissance Technologies (Simons)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
       },
       {
         "ticker": "UTHR",
         "name": "UNITED THERAPEUTICS CORP DEL",
-        "value_usd": 925846052000.0,
-        "shares": 1708739,
+        "value_usd": 908152909000.0,
+        "shares": 1675899,
         "fund": "Renaissance Technologies (Simons)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
       },
       {
-        "ticker": "PLTR",
-        "name": "PALANTIR TECHNOLOGIES INC",
-        "value_usd": 883001728000.0,
-        "shares": 7568370,
+        "ticker": "INTC",
+        "name": "INTEL CORP",
+        "value_usd": 834545560000.0,
+        "shares": 6941236,
         "fund": "Renaissance Technologies (Simons)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
       },
       {
         "ticker": "GOOGL",
         "name": "ALPHABET INC",
-        "value_usd": 828174623000.0,
-        "shares": 2317438,
+        "value_usd": 827731731000.0,
+        "shares": 2405471,
         "fund": "Renaissance Technologies (Simons)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
+      },
+      {
+        "ticker": "UNH",
+        "name": "UNITEDHEALTH GROUP INC",
+        "value_usd": 817384838000.0,
+        "shares": 2226720,
+        "fund": "Renaissance Technologies (Simons)",
+        "date": "2026-09-30"
       },
       {
         "ticker": "EXEL",
         "name": "EXELIXIS INC",
-        "value_usd": 730617099000.0,
-        "shares": 13427993,
+        "value_usd": 747221198000.0,
+        "shares": 12792693,
         "fund": "Renaissance Technologies (Simons)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
       },
       {
         "ticker": "VRSN",
         "name": "VERISIGN INC",
-        "value_usd": 616264393000.0,
-        "shares": 2449771,
+        "value_usd": 648925033000.0,
+        "shares": 2301071,
         "fund": "Renaissance Technologies (Simons)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
       },
       {
-        "ticker": "KGC",
-        "name": "KINROSS GOLD CORP",
-        "value_usd": 584529171000.0,
-        "shares": 24747213,
+        "ticker": "SPCX",
+        "name": "SPACE EXPLORATION TECHN CORP",
+        "value_usd": 620517529000.0,
+        "shares": 4113200,
         "fund": "Renaissance Technologies (Simons)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
       },
       {
-        "ticker": "CRWD",
-        "name": "CROWDSTRIKE HLDGS INC",
-        "value_usd": 571561334000.0,
-        "shares": 748960,
+        "ticker": "CORT",
+        "name": "CORCEPT THERAPEUTICS INC",
+        "value_usd": 558875064000.0,
+        "shares": 4850083,
         "fund": "Renaissance Technologies (Simons)",
-        "date": "2026-06-30"
-      },
-      {
-        "ticker": "STRL",
-        "name": "STERLING INFRASTRUCTURE INC",
-        "value_usd": 564212756000.0,
-        "shares": 672194,
-        "fund": "Renaissance Technologies (Simons)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
       },
       {
         "ticker": "GOOG",
         "name": "ALPHABET INC",
-        "value_usd": 556782741000.0,
-        "shares": 1575815,
+        "value_usd": 547536817000.0,
+        "shares": 1606903,
         "fund": "Renaissance Technologies (Simons)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
       },
       {
-        "ticker": "AMZN",
-        "name": "AMAZON COM INC",
-        "value_usd": 545974975000.0,
-        "shares": 2290710,
+        "ticker": "KGC",
+        "name": "KINROSS GOLD CORP",
+        "value_usd": 515295457000.0,
+        "shares": 21399313,
         "fund": "Renaissance Technologies (Simons)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
       },
       {
-        "ticker": "AGX",
-        "name": "ARGAN INC",
-        "value_usd": 517763050000.0,
-        "shares": 648379,
+        "ticker": "STX",
+        "name": "SEAGATE TECHNOLOGY HLDNGS PL",
+        "value_usd": 503757205000.0,
+        "shares": 546173,
         "fund": "Renaissance Technologies (Simons)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
       },
       {
-        "ticker": "NFLX",
-        "name": "NETFLIX INC.",
-        "value_usd": 484655614000.0,
-        "shares": 6787884,
+        "ticker": "SNDK",
+        "name": "SANDISK CORP",
+        "value_usd": 481009989000.0,
+        "shares": 276460,
         "fund": "Renaissance Technologies (Simons)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
+      },
+      {
+        "ticker": "W",
+        "name": "WAYFAIR INC",
+        "value_usd": 439667131000.0,
+        "shares": 4286926,
+        "fund": "Renaissance Technologies (Simons)",
+        "date": "2026-09-30"
       }
     ],
     "Citadel Advisors (Griffin)": [
