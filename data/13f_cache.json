@@ -1,126 +1,46 @@
 {
-  "updated_at": "2026-11-15T13:40:51.863416",
+  "updated_at": "2026-11-22T14:18:45.420679",
   "funds": {
     "Situational Awareness (Aschenbrenner)": [
       {
-        "ticker": "SNDK",
-        "name": "SANDISK CORP",
-        "value_usd": 5673738513000.0,
-        "shares": 2495344,
-        "fund": "Situational Awareness (Aschenbrenner)",
-        "date": "2026-06-30"
-      },
-      {
-        "ticker": "MU",
-        "name": "MICRON TECHNOLOGY INC",
-        "value_usd": 5573819392000.0,
-        "shares": 4828786,
-        "fund": "Situational Awareness (Aschenbrenner)",
-        "date": "2026-06-30"
-      },
-      {
-        "ticker": "BE",
-        "name": "BLOOM ENERGY CORP",
-        "value_usd": 1898778982000.0,
-        "shares": 6272808,
-        "fund": "Situational Awareness (Aschenbrenner)",
-        "date": "2026-06-30"
-      },
-      {
-        "ticker": "TSM",
-        "name": "TAIWAN SEMICONDUCTOR MANUFAC",
-        "value_usd": 1265099645000.0,
-        "shares": 2649035,
-        "fund": "Situational Awareness (Aschenbrenner)",
-        "date": "2026-06-30"
-      },
-      {
-        "ticker": "NBIS",
-        "name": "NEBIUS GROUP N.V.",
-        "value_usd": 1232894684000.0,
-        "shares": 4464260,
-        "fund": "Situational Awareness (Aschenbrenner)",
-        "date": "2026-06-30"
-      },
-      {
-        "ticker": "CRWV",
-        "name": "COREWEAVE INC",
-        "value_usd": 744515203000.0,
-        "shares": 7479558,
-        "fund": "Situational Awareness (Aschenbrenner)",
-        "date": "2026-06-30"
-      },
-      {
-        "ticker": "CORZ",
-        "name": "CORE SCIENTIFIC INC NEW",
-        "value_usd": 665556824000.0,
-        "shares": 26008473,
-        "fund": "Situational Awareness (Aschenbrenner)",
-        "date": "2026-06-30"
-      },
-      {
-        "ticker": "STM",
-        "name": "STMICROELECTRONICS",
-        "value_usd": 584344203000.0,
-        "shares": 7802700,
-        "fund": "Situational Awareness (Aschenbrenner)",
-        "date": "2026-06-30"
-      },
-      {
-        "ticker": "APLD",
-        "name": "APPLIED DIGITAL CORP",
-        "value_usd": 469022807000.0,
-        "shares": 15384616,
-        "fund": "Situational Awareness (Aschenbrenner)",
-        "date": "2026-06-30"
-      },
-      {
-        "ticker": "RIOT",
-        "name": "RIOT PLATFORMS INC",
-        "value_usd": 468198000000.0,
-        "shares": 17100000,
-        "fund": "Situational Awareness (Aschenbrenner)",
-        "date": "2026-06-30"
-      },
-      {
         "ticker": "SHAZ",
         "name": "SHARONAI HOLDINGS INC",
-        "value_usd": 456836112000.0,
-        "shares": 5396127,
+        "value_usd": 440673870000.0,
+        "shares": 8070950,
         "fund": "Situational Awareness (Aschenbrenner)",
-        "date": "2026-06-30"
-      },
-      {
-        "ticker": "IREN",
-        "name": "IREN LIMITED",
-        "value_usd": 433250547000.0,
-        "shares": 9474099,
-        "fund": "Situational Awareness (Aschenbrenner)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
       },
       {
         "ticker": "CLSK",
         "name": "CLEANSPARK INC",
-        "value_usd": 178617822000.0,
-        "shares": 12276139,
+        "value_usd": 38885094000.0,
+        "shares": 3019029,
         "fund": "Situational Awareness (Aschenbrenner)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
       },
       {
-        "ticker": "KEEL",
-        "name": "KEEL INFRASTRUCTURE CORP",
-        "value_usd": 151830996000.0,
-        "shares": 26451393,
+        "ticker": "IREN",
+        "name": "IREN LIMITED",
+        "value_usd": 21579080000.0,
+        "shares": 527864,
         "fund": "Situational Awareness (Aschenbrenner)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
       },
       {
-        "ticker": "SEI",
-        "name": "SOLARIS ENERGY INFRAS INC",
-        "value_usd": 90889306000.0,
-        "shares": 1129621,
+        "ticker": "BTDR",
+        "name": "BITDEER TECHNOLOGIES GROUP",
+        "value_usd": 20294143000.0,
+        "shares": 1934618,
         "fund": "Situational Awareness (Aschenbrenner)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
+      },
+      {
+        "ticker": "FRMI",
+        "name": "FERMI INC",
+        "value_usd": 11248691000.0,
+        "shares": 2671898,
+        "fund": "Situational Awareness (Aschenbrenner)",
+        "date": "2026-09-30"
       }
     ],
     "Renaissance Technologies (Simons)": [
@@ -249,122 +169,122 @@
       {
         "ticker": "IVV",
         "name": "ISHARES TR",
-        "value_usd": 13204483149000.0,
-        "shares": 17632073,
+        "value_usd": 11154779098000.0,
+        "shares": 14565227,
         "fund": "Citadel Advisors (Griffin)",
-        "date": "2026-06-30"
-      },
-      {
-        "ticker": "NVDA",
-        "name": "NVIDIA CORPORATION",
-        "value_usd": 2090151745000.0,
-        "shares": 10446058,
-        "fund": "Citadel Advisors (Griffin)",
-        "date": "2026-06-30"
-      },
-      {
-        "ticker": "AAPL",
-        "name": "APPLE INC",
-        "value_usd": 2086723980000.0,
-        "shares": 7211515,
-        "fund": "Citadel Advisors (Griffin)",
-        "date": "2026-06-30"
-      },
-      {
-        "ticker": "AMZN",
-        "name": "AMAZON COM INC",
-        "value_usd": 2033620320000.0,
-        "shares": 8532434,
-        "fund": "Citadel Advisors (Griffin)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
       },
       {
         "ticker": "MSFT",
         "name": "MICROSOFT CORP",
-        "value_usd": 1262049757000.0,
-        "shares": 3383330,
+        "value_usd": 2887099226000.0,
+        "shares": 5628971,
         "fund": "Citadel Advisors (Griffin)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
       },
       {
-        "ticker": "EA",
-        "name": "ELECTRONIC ARTS INC",
-        "value_usd": 1189462055000.0,
-        "shares": 5801122,
+        "ticker": "SPY",
+        "name": "STATE STR SPDR S&P 500 ETF T",
+        "value_usd": 2436352707000.0,
+        "shares": 3194672,
         "fund": "Citadel Advisors (Griffin)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
+      },
+      {
+        "ticker": "NVDA",
+        "name": "NVIDIA CORPORATION",
+        "value_usd": 2349916467000.0,
+        "shares": 10289502,
+        "fund": "Citadel Advisors (Griffin)",
+        "date": "2026-09-30"
+      },
+      {
+        "ticker": "MA",
+        "name": "MASTERCARD INCORPORATED",
+        "value_usd": 2013214029000.0,
+        "shares": 3650632,
+        "fund": "Citadel Advisors (Griffin)",
+        "date": "2026-09-30"
+      },
+      {
+        "ticker": "AAPL",
+        "name": "APPLE INC",
+        "value_usd": 1520533354000.0,
+        "shares": 4565892,
+        "fund": "Citadel Advisors (Griffin)",
+        "date": "2026-09-30"
+      },
+      {
+        "ticker": "META",
+        "name": "META PLATFORMS INC",
+        "value_usd": 1276545957000.0,
+        "shares": 1760316,
+        "fund": "Citadel Advisors (Griffin)",
+        "date": "2026-09-30"
+      },
+      {
+        "ticker": "NSC",
+        "name": "NORFOLK SOUTHN CORP",
+        "value_usd": 1196791917000.0,
+        "shares": 3873113,
+        "fund": "Citadel Advisors (Griffin)",
+        "date": "2026-09-30"
       },
       {
         "ticker": "WBD",
         "name": "WARNER BROS DISCOVERY INC",
-        "value_usd": 1170217452000.0,
-        "shares": 43894128,
+        "value_usd": 1151088655000.0,
+        "shares": 37191879,
         "fund": "Citadel Advisors (Griffin)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
       },
       {
-        "ticker": "GOOGL",
-        "name": "ALPHABET INC",
-        "value_usd": 1026843372000.0,
-        "shares": 2873334,
+        "ticker": "PG",
+        "name": "PROCTER & GAMBLE CO",
+        "value_usd": 1040934687000.0,
+        "shares": 7165024,
         "fund": "Citadel Advisors (Griffin)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
       },
       {
-        "ticker": "GOOG",
-        "name": "ALPHABET INC",
-        "value_usd": 899413175000.0,
-        "shares": 2545533,
+        "ticker": "AMZN",
+        "name": "AMAZON COM INC",
+        "value_usd": 1005373070000.0,
+        "shares": 4035212,
         "fund": "Citadel Advisors (Griffin)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
       },
       {
-        "ticker": "SPCX",
-        "name": "SPACE EXPLORATION TECHN CORP",
-        "value_usd": 876491980000.0,
-        "shares": 5129884,
+        "ticker": "ARKK",
+        "name": "ARK ETF TR",
+        "value_usd": 892323937000.0,
+        "shares": 10014859,
         "fund": "Citadel Advisors (Griffin)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
+      },
+      {
+        "ticker": "JPM",
+        "name": "JPMORGAN CHASE & CO",
+        "value_usd": 831324842000.0,
+        "shares": 2512846,
+        "fund": "Citadel Advisors (Griffin)",
+        "date": "2026-09-30"
+      },
+      {
+        "ticker": "DRAM",
+        "name": "ROUNDHILL ETF TRUST",
+        "value_usd": 786815959000.0,
+        "shares": 13035387,
+        "fund": "Citadel Advisors (Griffin)",
+        "date": "2026-09-30"
       },
       {
         "ticker": "LLY",
         "name": "ELI LILLY & CO",
-        "value_usd": 874462433000.0,
-        "shares": 729065,
+        "value_usd": 762502992000.0,
+        "shares": 658989,
         "fund": "Citadel Advisors (Griffin)",
-        "date": "2026-06-30"
-      },
-      {
-        "ticker": "BLK",
-        "name": "BLACKROCK INC",
-        "value_usd": 872959938000.0,
-        "shares": 907858,
-        "fund": "Citadel Advisors (Griffin)",
-        "date": "2026-06-30"
-      },
-      {
-        "ticker": "AMD",
-        "name": "ADVANCED MICRO DEVICES INC",
-        "value_usd": 819341024000.0,
-        "shares": 1410444,
-        "fund": "Citadel Advisors (Griffin)",
-        "date": "2026-06-30"
-      },
-      {
-        "ticker": "ABBV",
-        "name": "ABBVIE INC",
-        "value_usd": 797644194000.0,
-        "shares": 3169783,
-        "fund": "Citadel Advisors (Griffin)",
-        "date": "2026-06-30"
-      },
-      {
-        "ticker": "AVGO",
-        "name": "BROADCOM INC",
-        "value_usd": 771370411000.0,
-        "shares": 2042013,
-        "fund": "Citadel Advisors (Griffin)",
-        "date": "2026-06-30"
+        "date": "2026-09-30"
       }
     ]
   }
